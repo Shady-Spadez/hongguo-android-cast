@@ -172,10 +172,13 @@ function load(fetchPlayUrlSingle, overrides = {}) {
   });
   await check('unresponsive source lookup has a finite wait instead of leaving playback loading',async()=>{
     const h=harness(()=>new Promise(()=>{}));
-    h.context.setTimeout=(fn,ms)=>setTimeout(fn,Math.min(ms,5));
+    const deadlines=[];
+    h.context.setTimeout=(fn,ms)=>{ deadlines.push(ms); assert.ok(ms>0 && ms<=30000); return setTimeout(fn,Math.min(ms,5)); };
     const pending=h.handlers['prepare-online-play']({}, {vid:'11',seriesId:'1',requestId:'timeout'});
-    const result=await Promise.race([pending,sleep(80).then(()=>({unbounded:true}))]);
+    // Several scaled retries run here; Windows CI timer granularity is not the source timeout.
+    const result=await Promise.race([pending,sleep(2000).then(()=>({unbounded:true}))]);
     await h.handlers['release-online-play']({}, {requestId:'timeout'});await pending;
+    assert.ok(deadlines.includes(30000),'source lookup must retain its 30-second deadline');
     assert.ok(!result.unbounded,'source lookup never settled within its time budget');assert.equal(result.success,false);assert.match(result.error,/超时/);
   });
   for(const h of harnesses) {
