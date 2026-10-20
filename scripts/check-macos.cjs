@@ -127,7 +127,7 @@ function load(platform = 'darwin') {
   await check('Mac About panel displays only the public two-part version', async () => {
     const h = load();
     await h.ready();
-    assert.equal(h.about()?.applicationVersion, '2.0');
+    assert.equal(h.about()?.applicationVersion, require('../package.json').version.replace(/^(\d+\.\d+)\.0$/, '$1'));
     assert.equal(h.about()?.version, '');
   });
   assert.equal(failures.length, 0, failures.join('; '));
