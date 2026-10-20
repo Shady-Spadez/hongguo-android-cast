@@ -52,7 +52,7 @@ test('lock owner starts once; repeated launches restore its existing window', as
   for (const preview of [false, true]) {
     const h = load(true, preview);
     for (const callback of h.ready) await callback();
-    const expectedDirectory = preview ? '/tmp/hongguo-experience-preview' : '/tmp/hongguo-single-instance-test';
+    const expectedDirectory = preview ? path.join('/tmp', 'hongguo-experience-preview') : '/tmp/hongguo-single-instance-test';
     assert.deepEqual(h.events[0], ['lock', expectedDirectory], 'take lock after preview userData isolation');
     assert.equal(h.events.filter(event => event[0] === 'store').length, 1);
     assert.equal(h.events.find(event => event[0] === 'store')[1], path.join(expectedDirectory, 'data.json'));

@@ -48,7 +48,7 @@ const checks = [
     vm.runInNewContext(extract('seriesDownloadDir'), context);
     const resolve = context.seriesDownloadDir;
     const official = resolve('/downloads', '123', '同名剧');
-    assert.equal(official, '/downloads/红果短剧/同名剧-' + createHash('sha256').update('123').digest('hex').slice(0, 12));
+    assert.equal(official, path.join('/downloads', '红果短剧', '同名剧-' + createHash('sha256').update('123').digest('hex').slice(0, 12)));
     assert.notEqual(official, resolve('/downloads', '456', '同名剧'));
     const a = resolve('/downloads', 'xifan:huabo:a', '同名剧');
     assert.notEqual(a, resolve('/downloads', '123', '同名剧'));

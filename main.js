@@ -3879,6 +3879,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
 
   if (process.platform === 'darwin') {
+    app.setAboutPanelOptions?.({ applicationVersion: APP_VERSION.replace(/^(\d+\.\d+)\.0$/, '$1'), version: '' });
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: APP_TITLE, submenu: [
         { role: 'about', label: `关于${APP_TITLE}` },
