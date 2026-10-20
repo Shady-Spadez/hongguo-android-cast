@@ -198,6 +198,86 @@ async function check(name, run) { try { await run(); console.log('PASS ' + name)
     assert.equal(h.settings().proxy_password, '');
     assert.equal((await h.handlers['get-settings']({})).proxy_password_set, false);
   });
+  await check('old download records remain playable and revealable after changing the root', async () => {
+    const h = load();
+    const oldDir = path.join(root, 'old-downloads'); fs.mkdirSync(oldDir);
+    const one = task('one', oldDir); file(one.savePath);
+    const merged = path.join(oldDir, 'merged.mp4'); file(merged);
+    h.set('downloadTasks', [one]); h.set('mergeTasks', [{ output: merged, status: 'completed' }]);
+    file(h.context.compatPathFor('S', 1));
+    assert.equal((await h.handlers['show-in-folder']({}, one.savePath)).success, true, 'old registered episode must remain revealable');
+    assert.equal((await h.handlers['show-in-folder']({}, merged)).success, true, 'old registered merge must remain revealable');
+    const playable = await h.handlers['transcode-for-playback']({}, { seriesId: 'S', vidIndex: 1, vid: 'one', filePath: one.savePath });
+    assert.equal(playable.success, true, playable.error);
+    assert.equal(playable.cached, true);
+  });
+  await check('historical media authorization rejects siblings, mismatched episodes and symlink escapes', async () => {
+    const h = load();
+    const oldDir = path.join(root, 'historical-safety'); fs.mkdirSync(oldDir);
+    const one = task('one', oldDir); file(one.savePath); h.set('downloadTasks', [one]);
+    const sibling = path.join(oldDir, 'unregistered.mp4'); file(sibling);
+    assert.equal((await h.handlers['show-in-folder']({}, sibling)).success, false);
+    for (const identity of [{ seriesId: 'other', vidIndex: 1, vid: 'one' }, { seriesId: 'S', vidIndex: 2, vid: 'one' }, { seriesId: 'S', vidIndex: 1, vid: 'other' }]) {
+      const result = await h.handlers['transcode-for-playback']({}, { ...identity, filePath: one.savePath });
+      assert.equal(result.success, false); assert.match(result.error, /下载目录/);
+    }
+    fs.unlinkSync(one.savePath); fs.symlinkSync(sibling, one.savePath);
+    assert.equal((await h.handlers['show-in-folder']({}, one.savePath)).success, false, 'a registered name must not grant access to a replacement symlink');
+    const denied = await h.handlers['transcode-for-playback']({}, { seriesId: 'S', vidIndex: 1, vid: 'one', filePath: one.savePath });
+    assert.equal(denied.success, false); assert.match(denied.error, /下载目录/);
+    const linkedDir = path.join(oldDir, 'linked');
+    const outsideDir = path.join(root, 'unregistered-directory'); fs.mkdirSync(outsideDir);
+    fs.symlinkSync(outsideDir, linkedDir, process.platform === 'win32' ? 'junction' : 'dir');
+    const escaped = task('two', oldDir, 'completed', path.join('linked', 'two.mp4'), 2);
+    file(escaped.savePath); h.set('downloadTasks', [escaped]);
+    assert.equal((await h.handlers['show-in-folder']({}, escaped.savePath)).success, false);
+    const escapedResult = await h.handlers['transcode-for-playback']({}, { seriesId: 'S', vidIndex: 2, vid: 'two', filePath: escaped.savePath });
+    assert.equal(escapedResult.success, false);
+  });
+  await check('IPv6 proxy rules have one bracket pair and matching login challenges receive credentials', async () => {
+    const h = load();
+    await h.context.applyProxySettings({ proxy_enabled: true, proxy_mode: 'custom', proxy_host: 'http://[::1]:7890', proxy_username: 'user', proxy_password: 'pw' });
+    assert.equal(h.proxyCalls.at(-1).proxyRules, 'http://[::1]:7890');
+    for (const host of ['::1', '[::1]']) {
+      let auth = null;
+      h.app.emit('login', { preventDefault() {} }, null, null, { isProxy: true, host, port: 7890 }, (user, password) => { auth = [user, password]; });
+      assert.deepEqual(auth, ['user', 'pw'], host);
+    }
+    for (const challenge of [{ isProxy: true, host: '::2', port: 7890 }, { isProxy: true, host: '::1', port: 7891 }, { isProxy: false, host: '::1', port: 7890 }]) {
+      let called = false;
+      h.app.emit('login', { preventDefault() {} }, null, null, challenge, () => { called = true; });
+      assert.equal(called, false);
+    }
+    const overridden = h.context.resolveProxyConfig({ proxy_enabled: true, proxy_mode: 'custom', proxy_host: 'http://[::1]:7890', proxy_port: 7891 });
+    assert.equal(overridden.url, 'http://[::1]:7891');
+    const encoded = h.context.resolveProxyConfig({ proxy_enabled: true, proxy_mode: 'custom', proxy_host: '127.0.0.1:80', proxy_username: 'user%40', proxy_password: 'pw%40:@' });
+    const parsed = new URL(encoded.url);
+    assert.equal(decodeURIComponent(parsed.username), 'user%40');
+    assert.equal(decodeURIComponent(parsed.password), 'pw%40:@');
+  });
+  await check('credentials pasted in a proxy URL are hidden and survive settings round trips', async () => {
+    let seen;
+    const h = load({ proxy_enabled: true, proxy_mode: 'custom', proxy_host: 'http://url-user:secret%40fixture@[::1]:7890', proxy_port: '' }, {
+      axios: { get: async (_url, options) => { seen = options; return { status: 200 }; } },
+    });
+    const visible = await h.handlers['get-settings']({});
+    assert.equal(JSON.stringify(visible).includes('secret'), false, 'embedded URL password reached the renderer');
+    assert.equal(visible.proxy_password_set, true);
+    assert.equal((await h.handlers['save-settings']({}, { ...visible, proxy_password: '' })).success, true);
+    assert.equal((await h.handlers['test-proxy']({}, { ...visible, proxy_password: '' })).success, true);
+    assert.equal(seen.proxy.auth.username, 'url-user');
+    assert.equal(seen.proxy.auth.password, 'secret@fixture');
+    await h.handlers['save-settings']({}, { clear_proxy_password: true });
+    assert.equal((await h.handlers['get-settings']({})).proxy_password_set, false);
+    assert.equal(h.context.resolveProxyConfig(h.context.getCurrentSettings()).url.includes('secret'), false);
+    await h.handlers['save-settings']({}, { proxy_host: 'http://new-user:new-secret@127.0.0.1:80', proxy_port: '' });
+    const next = await h.handlers['get-settings']({});
+    assert.equal(next.proxy_password_set, true);
+    assert.equal(JSON.stringify(next).includes('new-secret'), false);
+    assert.equal((await h.handlers['test-proxy']({}, { ...next, proxy_password: '' })).success, true);
+    assert.equal(seen.proxy.auth.password, 'new-secret');
+    assert.equal(seen.proxy.port, 80);
+  });
   await check('system proxy restores the startup environment and proxy auth stays out of proxy rules', async () => {
     const previous = process.env.HTTPS_PROXY;
     process.env.HTTPS_PROXY = 'http://startup-proxy:1';

@@ -20,7 +20,7 @@ const DIST = path.join(ROOT, 'dist');
 const OUT = path.join(DIST, 'release');
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const VERSION = pkg.version;
+const VERSION = pkg.version.replace(/^(\d+\.\d+)\.0$/, '$1');
 const PRODUCT = pkg.build.productName || pkg.name;
 const SLUG = pkg.name; // hongguo-downloader
 

@@ -7,6 +7,7 @@ const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const yaml = require('js-yaml');
 const pkg = require('../package.json');
+const publicVersion = pkg.version.replace(/^(\d+\.\d+)\.0$/, '$1');
 const [arm64App, x64App, output] = process.argv.slice(2);
 assert.equal(process.platform, 'darwin', 'Mac update packages require macOS');
 assert(arm64App && x64App && output, 'Usage: node scripts/prepare-mac-update.cjs ARM64.app X64.app OUTPUT');
@@ -21,7 +22,7 @@ for (const [arch, source] of [['arm64', arm64App], ['x64', x64App]]) {
   assert.equal(run('lipo', ['-archs', path.join(app, 'Contents/MacOS', executable)]), arch === 'arm64' ? 'arm64' : 'x86_64');
   run('codesign', ['--verify', '--deep', '--strict', app]);
   run('xcrun', ['stapler', 'validate', app]);
-  const url = `hongguo-downloader-${pkg.version}-mac-${arch}.zip`;
+  const url = `hongguo-downloader-${publicVersion}-mac-${arch}.zip`;
   const destination = path.resolve(output, url);
   assert(!fs.existsSync(destination), 'Refusing to overwrite an existing update ZIP');
   run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, destination]);

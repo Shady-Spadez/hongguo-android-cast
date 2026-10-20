@@ -221,6 +221,24 @@ function snapshotProxyUrl() {
     || originalProxyEnv.HTTP_PROXY || originalProxyEnv.http_proxy || null;
 }
 
+function normalizeProxySettings(settings) {
+  const copy = { ...settings };
+  const host = String(copy.proxy_host || '').trim();
+  if (!host.includes('@')) return copy;
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`);
+    if (url.username || url.password) {
+      copy.proxy_username = decodeURIComponent(url.username);
+      copy.proxy_password = decodeURIComponent(url.password);
+      copy.proxy_host = host.replace(/^((?:[a-z][a-z0-9+.-]*:\/\/)?)[^/]*@/i, '$1');
+    }
+  } catch (_) {
+    // 无效地址也不能把 userinfo 原样返回给页面。
+    copy.proxy_host = host.replace(/^((?:[a-z][a-z0-9+.-]*:\/\/)?)[^/]*@/i, '$1');
+  }
+  return copy;
+}
+
 /**
  * 计算当前生效的代理 URL。
  * 返回 { mode, url }：
@@ -238,26 +256,23 @@ function resolveProxyConfig(settings) {
     return { mode: 'direct', url: null };
   }
   if (mode === 'custom') {
-    let host = String(s.proxy_host || '').trim();
+    const host = String(s.proxy_host || '').trim();
     const port = String(s.proxy_port || '').trim();
     if (!host) return { mode: 'custom', url: null };
-    // 容错：用户可能直接粘贴了 http://host:port 甚至带账号密码
-    let protocol = 'http';
-    const scheme = host.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
-    if (scheme) {
-      protocol = scheme[1].toLowerCase();
-      host = host.slice(scheme[0].length);
-    }
-    host = host.replace(/\/+$/, '');
-    if (!port && !/:\d+$/.test(host)) return { mode: 'custom', url: null };
-
-    const username = String(s.proxy_username || '').trim();
-    const password = String(s.proxy_password || '');
-    let auth = '';
-    if (username) {
-      auth = encodeURIComponent(username) + ':' + encodeURIComponent(password) + '@';
-    }
-    return { mode: 'custom', url: `${protocol}://${auth}${host}${port ? ':' + port : ''}` };
+    // URL 组件避免粘贴完整地址后重复追加端口或 IPv6 方括号。
+    try {
+      const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`);
+      if (!port && !/:\d+\/?$/.test(host)) return { mode: 'custom', url: null };
+      if (port) {
+        if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) return { mode: 'custom', url: null };
+        url.port = port;
+      }
+      if (String(s.proxy_username || '').trim()) {
+        url.username = encodeURIComponent(String(s.proxy_username).trim());
+        url.password = encodeURIComponent(String(s.proxy_password || ''));
+      }
+      return { mode: 'custom', url: url.toString().replace(/\/$/, '') };
+    } catch (_) { return { mode: 'custom', url: null }; }
   }
   // system：以启动时的环境变量为准，不读已经被本进程改写过的值
   return { mode: 'system', url: snapshotProxyUrl() };
@@ -299,13 +314,14 @@ function proxyRuleForSession(resolved) {
   let url;
   try { url = new URL(resolved.url); } catch (_) { return null; }
   const protocol = (url.protocol || 'http:').replace(/:$/, '').toLowerCase();
-  const hostname = url.hostname.includes(':') ? `[${url.hostname}]` : url.hostname;
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const hostname = host.includes(':') ? `[${host}]` : host;
   if (!hostname) return null;
   const port = url.port;
   return {
     rule: port ? `${protocol}://${hostname}:${port}` : `${protocol}://${hostname}`,
     auth: url.username ? {
-      host: url.hostname,
+      host,
       port: port ? Number(port) : 0,
       username: decodeURIComponent(url.username),
       password: decodeURIComponent(url.password || ''),
@@ -359,7 +375,7 @@ function getCurrentSettings() {
   // 保证并发数合法
   const mc = parseInt(merged.max_concurrent, 10);
   MAX_CONCURRENT_DOWNLOADS = Number.isInteger(mc) && mc >= 1 && mc <= 10 ? mc : 3;
-  return { ...merged, max_concurrent: MAX_CONCURRENT_DOWNLOADS };
+  return normalizeProxySettings({ ...merged, max_concurrent: MAX_CONCURRENT_DOWNLOADS });
 }
 
 // 净化文件夹/文件名称（移除非法字符、结尾的点和空格、Windows 保留名）
@@ -1491,15 +1507,31 @@ function isInsideMediaRoot(target) {
   return mediaRoots().some((root) => pathInside(root, target));
 }
 
-// 在文件管理器中定位文件。只选中下载目录里的文件，不用 openPath，避免把缺失路径的父级当成可执行文件启动。
+function isRecordedMediaFile(target, episode) {
+  try {
+    if (!fs.lstatSync(target).isFile()) return false;
+    const matches = (recorded, dir) => typeof recorded === 'string'
+      && path.relative(path.resolve(recorded), path.resolve(target)) === ''
+      && pathInside(dir || path.dirname(recorded), target);
+    if (downloadTasks.some(task => matches(task.savePath, task.customDir)
+      && (!episode || (hasCompleteTaskFile(task)
+        && String(task.hongguoInfo?.series_id) === String(episode.seriesId)
+        && Number(task.hongguoInfo?.vid_index) === Number(episode.vidIndex)
+        && (!episode.vid || String(task.hongguoInfo?.vid) === String(episode.vid)))))) return true;
+    return !episode && mergeTasks.some(task => matches(task.output));
+  } catch (_) { return false; }
+}
+
+// 只定位下载目录或已登记媒体，不用 openPath，避免把缺失路径的父级当成可执行文件启动。
 ipcMain.handle('show-in-folder', async (event, filePath) => {
   try {
     if (typeof filePath !== 'string' || !filePath.trim()) return { success: false, error: '缺少路径' };
     const resolved = path.resolve(filePath);
-    if (!isInsideMediaRoot(resolved)) return { success: false, error: '只能打开下载目录中的文件' };
+    const recorded = isRecordedMediaFile(resolved);
+    if (!isInsideMediaRoot(resolved) && !recorded) return { success: false, error: '只能打开下载目录中的文件' };
     let target = resolved;
     if (!fs.existsSync(target)) target = path.dirname(resolved);
-    if (!isInsideMediaRoot(target) || !fs.existsSync(target)) return { success: false, error: '路径不存在' };
+    if ((!isInsideMediaRoot(target) && !recorded) || !fs.existsSync(target)) return { success: false, error: '路径不存在' };
     const stat = fs.statSync(target);
     if (!stat.isFile() && !stat.isDirectory()) return { success: false, error: '路径不存在' };
     shell.showItemInFolder(target);
@@ -2592,7 +2624,7 @@ async function transcodeForPlayback(payload, job = { controller: new AbortContro
     const { seriesId, vidIndex, filePath, force } = payload || {};
     const quality = playbackQuality(payload.quality, payload.vid || seriesId);
     if (!seriesId || vidIndex == null) return { success: false, error: '缺少剧集信息' };
-    if (filePath && fs.existsSync(filePath) && !isInsideMediaRoot(filePath)) {
+    if (filePath && fs.existsSync(filePath) && !isInsideMediaRoot(filePath) && !isRecordedMediaFile(filePath, payload)) {
       return { success: false, error: '只能转码下载目录中的视频' };
     }
     if (!(filePath && fs.existsSync(filePath)) && (/^(xifan|hema|custom):/.test(String(seriesId)) || /^(xifan|hema|custom):/.test(String(payload.vid)))) {
@@ -3061,7 +3093,7 @@ function settingsForRenderer(settings) {
 }
 
 function applyEditableSettings(current, incoming) {
-  const source = incoming && typeof incoming === 'object' ? incoming : {};
+  const source = normalizeProxySettings(incoming && typeof incoming === 'object' ? incoming : {});
   const merged = { ...current };
   for (const key of SETTINGS_KEYS) {
     if (key === 'proxy_password') continue;

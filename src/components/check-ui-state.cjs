@@ -428,6 +428,50 @@ async function mount(file, api, props = {}) {
     pending.resolve({ success: true, message: 'OLD_CONFIG_OK' }); await ui.flush();
     assert.ok(!ui.text().includes('OLD_CONFIG_OK'), 'old test result must not describe the edited draft'); ui.unmount();
   });
+  await test('proxy password save and clear refresh the UI without replaying credentials', async () => {
+    let stored = { proxy_enabled: true, proxy_mode: 'custom', proxy_host: '127.0.0.1', proxy_port: 7890, proxy_username: 'test-user', proxy_password: '' };
+    const submitted = [];
+    const ui = await mount('Settings', {
+      getSettings: async () => {
+        const { proxy_password, clear_proxy_password, ...visible } = stored;
+        return { ...visible, proxy_password_set: !!proxy_password };
+      },
+      saveSettings: async next => {
+        submitted.push({ ...next });
+        stored = { ...stored, ...next, proxy_password: next.clear_proxy_password ? '' : next.proxy_password || stored.proxy_password };
+        return { success: true };
+      },
+    });
+    await ui.flush();
+    ui.button('配置代理').props.onClick(); ui.render();
+    const password = () => ui.find(n => n.props['aria-label'] === '代理密码');
+    password().props.onChange({ target: { value: 'fixture-password' } }); ui.render();
+    await ui.button('保存并生效').props.onClick(); await ui.flush();
+    assert.equal(stored.proxy_password, 'fixture-password');
+    assert.equal(ui.find(n => n.props.role === 'dialog'), undefined);
+    ui.button('配置代理').props.onClick(); ui.render();
+    assert.equal(password().props.value, '');
+    assert.equal(password().props.placeholder, '已保存，留空表示不修改');
+    assert.ok(ui.button('清除已保存密码'), 'first password save must immediately enable clearing');
+    ui.button('取消').props.onClick(); ui.render();
+    ui.find(n => n.props['aria-label'] === '下载目录').props.onChange({ target: { value: '/fixture-downloads' } }); ui.render();
+    await ui.button('保存设置').props.onClick(); await ui.flush();
+    assert.equal(Object.hasOwn(submitted.at(-1), 'proxy_password'), false, 'ordinary save must not replay the password');
+    ui.button('配置代理').props.onClick(); ui.render();
+    ui.button('清除已保存密码').props.onClick(); ui.render();
+    await ui.button('保存并生效').props.onClick(); await ui.flush();
+    assert.equal(stored.proxy_password, '');
+    ui.button('配置代理').props.onClick(); ui.render();
+    assert.equal(password().props.placeholder, '密码');
+    assert.equal(ui.button('清除已保存密码'), undefined, 'cleared password must not appear saved');
+    ui.button('取消').props.onClick(); ui.render();
+    ui.find(n => n.props['aria-label'] === '下载目录').props.onChange({ target: { value: '/fixture-downloads-next' } }); ui.render();
+    await ui.button('保存设置').props.onClick(); await ui.flush();
+    assert.equal(Object.hasOwn(submitted.at(-1), 'proxy_password'), false);
+    assert.equal(Object.hasOwn(submitted.at(-1), 'clear_proxy_password'), false);
+    assert.equal(stored.proxy_password, '');
+    ui.unmount();
+  });
   await test('settings failed save reports the reason and retains the draft', async () => {
     const ui = await mount('Settings', { getSettings: async () => ({ root: '/old' }), saveSettings: async () => ({ success: false, error: '磁盘空间不足' }) });
     await ui.flush(); ui.find(n => n.props['aria-label'] === '下载目录').props.onChange({ target: { value: '/new' } }); ui.render();

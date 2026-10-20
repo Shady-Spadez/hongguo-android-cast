@@ -31,7 +31,7 @@ const SRC = path.join(DIST, 'win-unpacked');
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const PRODUCT = (pkg.build && pkg.build.productName) || pkg.name;
-const VERSION = pkg.version;
+const VERSION = pkg.version.replace(/^(\d+\.\d+)\.0$/, '$1');
 
 const FOLDER_NAME = `${PRODUCT}-${VERSION}`;
 const ZIP_PATH = path.join(DIST, `${PRODUCT}-${VERSION}-win-x64.zip`);

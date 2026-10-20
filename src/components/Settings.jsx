@@ -103,8 +103,8 @@ function SettingsPage({ active = true, preview = false }) {
       if (isProxy) submitted.clear_proxy_password = next.clear_proxy_password === true && !String(next.proxy_password || '');
       const res = await window.electronAPI.saveSettings(submitted);
       if (!res?.success) throw new Error(res?.error || '设置未保存，请重试');
-      setSettings(submitted);
       if (isProxy) closeProxy();
+      setSettings(await window.electronAPI.getSettings());
       setDirty(false);
       setSaved(true);
       clearTimeout(savedTimer.current);
@@ -122,6 +122,7 @@ function SettingsPage({ active = true, preview = false }) {
     testVersion.current++;
     setTesting(false);
     setProxyOpen(false);
+    setProxyDraft(null);
     setTestResult(null);
   };
 
