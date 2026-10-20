@@ -12,6 +12,8 @@ export default function AppUpdateNotice() {
   const currentState = useRef(state);
   const enabled = useRef(true);
   const actionPending = useRef(false);
+  const actionGeneration = useRef(0);
+  const openingRelease = useRef(false);
   const checkPending = useRef(false);
   const requestedManually = useRef(false);
   const dismissed = useRef(new Set());
@@ -72,7 +74,7 @@ export default function AppUpdateNotice() {
       setChecking(false);
       enabled.current = value;
       if (value) check();
-      else { setVisible(false); setError(''); }
+      else { actionGeneration.current++; actionPending.current = false; setPending(false); setVisible(false); setError(''); }
     });
     const revision = stateRevision;
     window.electronAPI.getAppUpdateState().then(next => {
@@ -100,17 +102,33 @@ export default function AppUpdateNotice() {
     setError('');
   };
   const act = async kind => {
-    if (!enabled.current || actionPending.current || checkPending.current || ['checking', 'downloading', 'installing'].includes(currentState.current.status)) return;
-    actionPending.current = true;
+    if (kind === 'openAppUpdate') {
+      if (!enabled.current || openingRelease.current) return;
+      openingRelease.current = true;
+      try {
+        const result = await window.electronAPI.openAppUpdate();
+        if (!result?.success && enabled.current) setError(result?.error || '无法打开发布页，请稍后重试。');
+      } catch { if (enabled.current) setError('无法打开发布页，请稍后重试。'); }
+      finally { openingRelease.current = false; }
+      return;
+    }
+    const cancelling = kind === 'cancelAppUpdate';
+    if (!enabled.current) return;
+    if (cancelling) {
+      if (actionPending.current === 'cancelAppUpdate' || !['checking', 'downloading'].includes(currentState.current.status) && actionPending.current !== 'downloadAppUpdate') return;
+    } else if (actionPending.current || checkPending.current || ['checking', 'downloading', 'installing'].includes(currentState.current.status)) return;
+    const request = ++actionGeneration.current;
+    actionPending.current = kind;
     setPending(true);
     setError('');
     try {
       const result = await window.electronAPI[kind]();
+      if (request !== actionGeneration.current) return;
       if (result?.state) { currentState.current = result.state; setState(result.state); }
       if (!result?.success && enabled.current) setError(result?.error || '更新操作失败，请稍后重试。');
     } catch {
-      if (enabled.current) setError('更新操作失败，请确认网络连接后重试。');
-    } finally { actionPending.current = false; setPending(false); }
+      if (request === actionGeneration.current && enabled.current) setError('更新操作失败，请确认网络连接后重试。');
+    } finally { if (request === actionGeneration.current) { actionPending.current = false; setPending(false); } }
   };
 
   if (!visible) return null;
@@ -132,7 +150,8 @@ export default function AppUpdateNotice() {
       {installing ? '正在重启…' : downloading ? '正在下载…' : pending ? '请稍候…' : downloaded ? '重启并安装' : state.supported ? '下载更新' : '前往 GitHub 下载'}
     </button>}
     {(!version || updateError) && !busy && <button type="button" className="btn btn-outline" onClick={() => checkNow.current?.(true)}>重新检查</button>}
-    {updateError && state.supported && (version || state.version) && <button type="button" className="btn btn-outline" disabled={busy || !enabled.current} onClick={() => act('openAppUpdate')}>前往发布页手动下载</button>}
+    {(downloading || state.status === 'checking' || pending && actionPending.current === 'downloadAppUpdate') && <button type="button" className="btn btn-outline" disabled={actionPending.current === 'cancelAppUpdate' || !enabled.current} onClick={() => act('cancelAppUpdate')}>取消下载</button>}
+    {(state.supported || !version) && <button type="button" className="btn btn-outline" disabled={!enabled.current} onClick={() => act('openAppUpdate')}>前往发布页手动下载</button>}
     </div>
     {updateError && <p role="alert">{updateError}</p>}
   </section>;

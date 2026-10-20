@@ -11,7 +11,7 @@ function createUpdateInstaller({ updater, currentVersion, isEnabled, installBloc
   updater.logger = null;
   updater.setFeedURL({ provider: 'github', owner: 'jackotom', repo: 'hongguo-drama' });
   let state = { supported: true, reason: '', status: 'idle', version: null, percent: 0, error: '' };
-  let operation = null, cancellationToken = null, generation = 0;
+  let operation = null, cancellationToken = null, generation = 0, operationGeneration = 0;
   let nativeInstallListener = null, nativeReadyVersion = null;
   const getState = () => ({ ...state });
   const update = patch => { state = { ...state, ...patch }; emit(getState()); };
@@ -20,11 +20,6 @@ function createUpdateInstaller({ updater, currentVersion, isEnabled, installBloc
     if (state.status !== 'downloading' || !isEnabled()) return;
     const percent = Math.max(0, Math.min(100, Math.floor(Number(progress.percent) || 0)));
     if (percent !== state.percent) update({ percent });
-  });
-  updater.on('update-downloaded', info => {
-    if (state.status !== 'downloading' || !isEnabled()) return;
-    const release = availableRelease({ tag_name: info.version }, currentVersion);
-    if (release?.version === state.version) update({ status: 'downloaded', percent: 100, error: '' });
   });
   updater.on('error', () => {
     if (!['checking', 'downloading', 'installing'].includes(state.status) || !isEnabled()) return;
@@ -38,20 +33,27 @@ function createUpdateInstaller({ updater, currentVersion, isEnabled, installBloc
     generation++;
     clearNativeInstall();
     nativeReadyVersion = null;
-    cancellationToken?.cancel();
     update({ status: 'idle', version: null, percent: 0, error: '' });
+    cancellationToken?.cancel();
+    return { success: true, state: getState() };
   }
   function download(expectedVersion) {
     if (!isEnabled()) return Promise.resolve(fail('自动检测更新已关闭，请先在设置中开启。'));
     if (state.status === 'installing') return Promise.resolve(fail('正在安装更新。'));
-    if (operation) return operation;
+    // The updater shares request state; finish cancelled work before starting a retry.
+    if (operation) {
+      if (operationGeneration === generation) return operation;
+      const queuedGeneration = generation;
+      return operation.then(() => queuedGeneration === generation ? download(expectedVersion) : fail('更新已取消。'));
+    }
     if (state.status === 'downloaded' && state.version === expectedVersion) return Promise.resolve({ success: true, state: getState() });
     const request = ++generation;
+    operationGeneration = request;
     update({ status: 'checking', version: expectedVersion, percent: 0, error: '' });
     operation = (async () => {
       try {
         const result = await updater.checkForUpdates();
-        if (request !== generation || !isEnabled()) return fail('更新已取消。');
+        if (request !== generation || !isEnabled()) { result?.cancellationToken?.cancel(); return fail('更新已取消。'); }
         const release = availableRelease({ tag_name: result?.updateInfo?.version }, currentVersion);
         if (!release || release.version !== expectedVersion) {
           update({ status: 'error', error: '新版信息已变化，请重新检查更新。' });
@@ -61,7 +63,8 @@ function createUpdateInstaller({ updater, currentVersion, isEnabled, installBloc
         update({ status: 'downloading' });
         await updater.downloadUpdate(cancellationToken);
         if (request !== generation || !isEnabled()) return fail('更新已取消。');
-        if (state.status !== 'downloaded') throw new Error('Update not ready');
+        // Only this operation's verified completion can make the update installable.
+        update({ status: 'downloaded', percent: 100, error: '' });
         return { success: true, state: getState() };
       } catch (_) {
         if (request !== generation || !isEnabled()) return fail('更新已取消。');

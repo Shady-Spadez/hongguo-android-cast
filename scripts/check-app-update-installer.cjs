@@ -113,6 +113,37 @@ function macFixture() {
   assert.equal(inFlight.controller.install().success, false);
   console.log('PASS preference: disabled, check cancellation and late download completion never install');
 
+  const manual = fixture(), oldDownload = manual.controller.download('1.81');
+  manual.checked(); await tick();
+  assert.equal(manual.controller.cancel()?.success, true, 'manual cancellation must return its idle state');
+  assert.equal(manual.token.cancelled, true);
+  const retry = manual.controller.download('1.81');
+  manual.updater.emit('download-progress', { percent: 99 });
+  manual.updater.emit('update-downloaded', { version: '1.81.0' });
+  assert.equal(manual.controller.getState().status, 'idle');
+  assert.equal(manual.controller.install().success, false);
+  assert.equal(manual.counts().checks, 1, 'retry waits for cancelled updater work to drain');
+  manual.downloaded(Error('cancelled'));
+  assert.equal((await oldDownload).success, false); await tick();
+  assert.equal(manual.counts().checks, 2, 'cancelled operation must allow a new download');
+  manual.checked(); await tick();
+  manual.updater.emit('update-downloaded', { version: '1.81.0' });
+  assert.equal(manual.controller.getState().status, 'downloading', 'late event alone must not mark a retry ready');
+  assert.equal(manual.controller.install().success, false);
+  manual.downloaded(); assert.equal((await retry).success, true);
+  assert.equal(manual.controller.getState().status, 'downloaded');
+  console.log('PASS manual cancellation: late events cannot install and queued retry completes independently');
+
+  const queued = fixture(), checking = queued.controller.download('1.81');
+  queued.controller.cancel();
+  const queuedRetry = queued.controller.download('1.81');
+  queued.controller.cancel(); queued.checked();
+  assert.equal((await checking).success, false); await tick();
+  assert.equal(queued.counts().checks, 1, 'cancelling a queued retry must not start it later');
+  assert.equal((await queuedRetry).success, false);
+  assert.equal(queued.token.cancelled, true, 'late check tokens must be cancelled');
+  console.log('PASS queued cancellation: cancelled retry never restarts after an old check resolves');
+
   const mac = macFixture();
   await mac.ready(); mac.controller.install(); await tick();
   assert.equal(mac.nativeCounts().quits, 0, 'Mac must wait for native signature verification');

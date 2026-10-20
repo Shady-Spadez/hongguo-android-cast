@@ -97,7 +97,7 @@ function mount(api = {}, component = 'AppUpdateNotice', props = {}) {
     ui.emit('hongguo-check-app-update'); await ui.flush();
     assert.ok(ui.button('重新检查'), 'failed check with a previous release must expose retry');
     assert.equal(ui.button('下载更新'), undefined, 'invalidated release must not keep its download action');
-    assert.equal(ui.button('前往发布页手动下载'), undefined, 'manual fallback needs a confirmed release or installer version');
+    assert.ok(ui.button('前往发布页手动下载'), 'failed checks retain the fixed official release fallback');
     result = { enabled: true, release }; await ui.button('重新检查').props.onClick(); await ui.flush();
     assert.equal(checks, 3); assert.ok(ui.button('下载更新')); assert.ok(!ui.text().includes('版本信息已失效')); ui.unmount();
   });
@@ -106,6 +106,33 @@ function mount(api = {}, component = 'AppUpdateNotice', props = {}) {
     const ui = mount({ downloadAppUpdate: async () => ({ success: false, error: '更新下载校验失败' }), openAppUpdate: async () => { opened++; return { success: true }; } });
     await ui.flush(); await ui.button('下载更新').props.onClick(); await ui.flush();
     assert.ok(ui.button('前往发布页手动下载')); await ui.button('前往发布页手动下载').props.onClick(); assert.equal(opened, 1); ui.unmount();
+  });
+  await test('manual download remains reachable while downloading and checking', async () => {
+    let opened = 0, finish;
+    const ui = mount({ downloadAppUpdate: () => new Promise(r => { finish = r; }), openAppUpdate: async () => { opened++; return { success: true }; } });
+    await ui.flush(); assert.ok(ui.button('前往发布页手动下载'));
+    const pending = ui.button('下载更新').props.onClick();
+    for (const status of ['checking', 'downloading']) {
+      ui.emit('onAppUpdateState', { ...idle, status, version: '9.0' }); await ui.flush();
+      const manual = ui.button('前往发布页手动下载'); assert.ok(manual); assert.equal(!!manual.props.disabled, false);
+      await manual.props.onClick();
+    }
+    assert.equal(opened, 2); finish({ success: true }); await pending; ui.unmount();
+  });
+  await test('cancel ignores old download response and allows retry', async () => {
+    let cancelled = 0; const completions = [];
+    const ui = mount({ downloadAppUpdate: () => new Promise(r => completions.push(r)), cancelAppUpdate: async () => { cancelled++; return { success: true, state: idle }; } });
+    await ui.flush(); const old = ui.button('下载更新').props.onClick();
+    ui.emit('onAppUpdateState', { ...idle, status: 'checking', version: '9.0' }); await ui.flush();
+    assert.ok(ui.button('取消下载')); await ui.button('取消下载').props.onClick(); await ui.flush();
+    assert.equal(cancelled, 1); assert.equal(!!ui.button('下载更新').props.disabled, false);
+    const retry = ui.button('下载更新').props.onClick();
+    ui.emit('onAppUpdateState', { ...idle, status: 'downloading', version: '9.0', percent: 20 }); await ui.flush();
+    completions[0]({ success: false, error: '更新已取消。', state: idle }); await old; await ui.flush();
+    assert.ok(ui.text().includes('20%')); assert.ok(!ui.text().includes('更新已取消。'));
+    assert.equal(ui.button('正在下载…').props.disabled, true);
+    completions[1]({ success: true, state: { ...idle, status: 'downloaded', version: '9.0', percent: 100 } }); await retry; await ui.flush();
+    assert.ok(ui.button('重启并安装')); ui.unmount();
   });
   await test('late native install failure remains recoverable without a check release', async () => {
     let opened = 0;

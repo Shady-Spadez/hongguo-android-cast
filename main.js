@@ -45,6 +45,8 @@ const { createStealthController } = require('./src/native/stealth-window');
 
 let mainWindow = null;
 let appUpdateInstaller = null;
+let appUpdater = null;
+let updateDownloadGeneration = 0;
 let pendingUpdateOperations = 0;
 const UPDATE_BLOCKED_CHANNELS = new Set(['hongguo-download-batch', 'download-single-episode', 'retry-task', 'retry-tasks', 'resume-all', 'merge-series', 'transcode-for-playback', 'prepare-online-play', 'save-settings']);
 const ipcMain = {
@@ -215,6 +217,7 @@ function getDefaultSettings() {
 const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'];
 const originalProxyEnv = Object.fromEntries(PROXY_ENV_KEYS.map((key) => [key, process.env[key]]));
 let activeProxyAuth = null;
+const sessionProxyConfigs = new WeakMap();
 
 function snapshotProxyUrl() {
   return originalProxyEnv.HTTPS_PROXY || originalProxyEnv.https_proxy
@@ -322,40 +325,41 @@ function proxyRuleForSession(resolved) {
     rule: port ? `${protocol}://${hostname}:${port}` : `${protocol}://${hostname}`,
     auth: url.username ? {
       host,
-      port: port ? Number(port) : 0,
+      port: port ? Number(port) : (protocol === 'https' ? 443 : protocol.startsWith('socks') ? 1080 : 80),
       username: decodeURIComponent(url.username),
       password: decodeURIComponent(url.password || ''),
     } : null,
   };
 }
 
-/** 让 Electron 窗口自身的请求（如封面图）也走代理 */
-async function applyProxyToSession(resolved) {
+/** 窗口和更新器使用不同 Session，代理规则必须分别应用。 */
+async function applyProxyToSession(resolved, sessions = [session.defaultSession, appUpdater?.netSession]) {
   activeProxyAuth = null;
-  try {
-    const ses = session.defaultSession;
-    if (!ses) return;
-    if (resolved.mode === 'direct') {
-      await ses.setProxy({ mode: 'direct' });
-    } else if (resolved.mode === 'custom' && resolved.url) {
-      const built = proxyRuleForSession(resolved);
-      if (!built) return;
-      activeProxyAuth = built.auth;
-      await ses.setProxy({ mode: 'fixed_servers', proxyRules: built.rule });
-    } else {
-      await ses.setProxy({ mode: 'system' });
-    }
-  } catch (e) {
-    console.error('[Proxy] 设置窗口代理失败');
+  let config = { mode: resolved.mode === 'direct' ? 'direct' : 'system' };
+  if (resolved.mode === 'custom' && resolved.url) {
+    const built = proxyRuleForSession(resolved);
+    if (!built) throw new Error('代理地址无效');
+    activeProxyAuth = built.auth;
+    config = { mode: 'fixed_servers', proxyRules: built.rule };
   }
+  const key = JSON.stringify([config, activeProxyAuth]);
+  await Promise.all(sessions.filter(Boolean).map(async ses => {
+    if (sessionProxyConfigs.get(ses) === key) return;
+    await ses.setProxy(config);
+    await ses.clearAuthCache?.();
+    await ses.closeAllConnections?.();
+    sessionProxyConfigs.set(ses, key);
+  }));
+}
+
+function matchesProxyAuth(authInfo) {
+  if (!authInfo?.isProxy || !activeProxyAuth) return false;
+  const host = String(authInfo.host || '').replace(/^\[|\]$/g, '').toLowerCase();
+  return host === activeProxyAuth.host && Number(authInfo.port) === activeProxyAuth.port;
 }
 
 app.on('login', (event, _webContents, _details, authInfo, callback) => {
-  if (!authInfo || !authInfo.isProxy || !activeProxyAuth) return;
-  const host = String(authInfo.host || '').replace(/^\[|\]$/g, '').toLowerCase();
-  if (!host || host !== String(activeProxyAuth.host || '').toLowerCase()) return;
-  const port = Number(authInfo.port) || 0;
-  if (activeProxyAuth.port && port && port !== activeProxyAuth.port) return;
+  if (!matchesProxyAuth(authInfo)) return;
   event.preventDefault();
   callback(activeProxyAuth.username, activeProxyAuth.password);
 });
@@ -364,7 +368,8 @@ app.on('login', (event, _webContents, _details, authInfo, callback) => {
 async function applyProxySettings(settings) {
   const resolved = resolveProxyConfig(settings);
   applyProxyToEnv(resolved);
-  await applyProxyToSession(resolved);
+  try { await applyProxyToSession(resolved); }
+  catch (_) { console.error('[Proxy] 设置网络代理失败'); }
   console.log(`[Proxy] mode=${resolved.mode}`);
   return resolved;
 }
@@ -3115,7 +3120,7 @@ ipcMain.handle('save-settings', async (event, settings) => {
     const merged = applyEditableSettings(current, settings);
     merged.download_quality = normalizeDownloadQuality(merged.download_quality);
     store.saveSettings(merged);
-    if (merged.app_updates_enabled === false) appUpdateInstaller?.cancel();
+    if (merged.app_updates_enabled === false) { updateDownloadGeneration++; appUpdateInstaller?.cancel(); }
     if (wasCheckingUpdates !== (merged.app_updates_enabled !== false)) {
       sendToRenderer('app-update-preference', merged.app_updates_enabled !== false);
     }
@@ -3659,19 +3664,26 @@ function appUpdateState() {
   return appUpdateInstaller?.getState() || { ...appUpdateSupport(), status: 'idle', version: null, percent: 0, error: '' };
 }
 function getAppUpdateInstaller() {
-  if (!appUpdateInstaller) appUpdateInstaller = require('./src/native/app-update-installer').createUpdateInstaller({
-    updater: require('electron-updater').autoUpdater,
-    currentVersion: APP_VERSION,
-    isEnabled: () => !IS_PREVIEW && getCurrentSettings().app_updates_enabled !== false,
-    installBlocker: () => {
-      if (pendingUpdateOperations) return '正在处理任务或保存设置，请稍后再安装更新。';
-      if (downloadRuns.size || downloadQueue.length || sourceRetryTimers.size) return '还有下载或等待重试的任务，请先在下载管理中暂停全部任务，再安装更新。';
-      if (mergeTasks.some(task => task.status === 'running') || compatPreparing.size || onlinePreparing.size) return '正在合并或准备视频，请等待完成或取消后再安装更新。';
-      if (storageError) return '本地数据保存异常，请先处理保存问题，再安装更新。';
-      return '';
-    },
-    emit: state => sendToRenderer('app-update-state', state),
-  });
+  if (!appUpdateInstaller) {
+    appUpdater = require('electron-updater').autoUpdater;
+    appUpdater.on('login', (authInfo, callback) => {
+      if (matchesProxyAuth(authInfo)) callback(activeProxyAuth.username, activeProxyAuth.password);
+      else callback();
+    });
+    appUpdateInstaller = require('./src/native/app-update-installer').createUpdateInstaller({
+      updater: appUpdater,
+      currentVersion: APP_VERSION,
+      isEnabled: () => !IS_PREVIEW && getCurrentSettings().app_updates_enabled !== false,
+      installBlocker: () => {
+        if (pendingUpdateOperations) return '正在处理任务或保存设置，请稍后再安装更新。';
+        if (downloadRuns.size || downloadQueue.length || sourceRetryTimers.size) return '还有下载或等待重试的任务，请先在下载管理中暂停全部任务，再安装更新。';
+        if (mergeTasks.some(task => task.status === 'running') || compatPreparing.size || onlinePreparing.size) return '正在合并或准备视频，请等待完成或取消后再安装更新。';
+        if (storageError) return '本地数据保存异常，请先处理保存问题，再安装更新。';
+        return '';
+      },
+      emit: state => sendToRenderer('app-update-state', state),
+    });
+  }
   return appUpdateInstaller;
 }
 ipcMain.handle('get-app-update-state', () => appUpdateState());
@@ -3679,8 +3691,22 @@ ipcMain.handle('download-app-update', async () => {
   const support = appUpdateSupport();
   if (!support.supported) return { success: false, error: support.reason };
   if (!latestAppRelease || getCurrentSettings().app_updates_enabled === false) return { success: false, error: '更新信息已失效，请重新检查更新。' };
-  try { return await getAppUpdateInstaller().download(latestAppRelease.version); }
+  try {
+    const request = updateDownloadGeneration;
+    const installer = getAppUpdateInstaller();
+    if (!['checking', 'downloading', 'downloaded', 'installing'].includes(installer.getState().status)) {
+      await applyProxyToSession(resolveProxyConfig(getCurrentSettings()), [appUpdater.netSession]);
+    }
+    if (request !== updateDownloadGeneration) return { success: false, error: '更新已取消。', state: installer.getState() };
+    return await installer.download(latestAppRelease.version);
+  }
   catch (_) { return { success: false, error: '无法准备应用内更新，请重试或前往发布页下载安装。' }; }
+});
+ipcMain.handle('cancel-app-update', () => {
+  if (appUpdateInstaller?.getState().status === 'installing') return { success: false, error: '正在安装更新，无法取消。', state: appUpdateState() };
+  updateDownloadGeneration++;
+  if (!appUpdateInstaller) return { success: true, state: appUpdateState() };
+  return appUpdateInstaller.cancel();
 });
 ipcMain.handle('install-app-update', () => {
   if (!appUpdateInstaller) return { success: false, error: '请先完成更新下载。' };
@@ -3696,7 +3722,17 @@ ipcMain.handle('check-app-update', async event => {
     updateRequest = axios.get('https://api.github.com/repos/jackotom/hongguo-drama/releases/latest', {
       timeout: 10000, maxRedirects: 0, maxContentLength: 1024 * 1024,
       headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Hongguo-Drama-Update-Check' },
-    }).then(response => ({ release: availableRelease(response.data, APP_VERSION), error: '' }))
+    }).catch(() => axios.get('https://github.com/jackotom/hongguo-drama/releases/latest', {
+      // GitHub's public release endpoint does not consume the anonymous API quota.
+      timeout: 10000, maxRedirects: 0, maxContentLength: 1024 * 1024,
+      headers: { Accept: 'application/json', 'User-Agent': 'Hongguo-Drama-Update-Check' },
+      validateStatus: status => status === 200 || status === 302,
+    }).then(response => {
+      if (response.status !== 302) return response;
+      const tag = /^https:\/\/github\.com\/jackotom\/hongguo-drama\/releases\/tag\/(v?\d+\.\d+(?:\.\d+)?)$/.exec(response.headers.location || '');
+      if (!tag) throw new Error('Unexpected update redirect');
+      return { data: { tag_name: tag[1] } };
+    })).then(response => ({ release: availableRelease(response.data, APP_VERSION), error: '' }))
       .catch(() => ({ release: null, error: '暂时无法检查更新，请检查网络后重试。' }))
       .finally(() => { updateRequest = null; });
   }
