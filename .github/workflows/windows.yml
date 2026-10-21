@@ -1,6 +1,11 @@
 name: Windows x64 release candidate
 on:
   workflow_dispatch:
+    inputs:
+      skip_playback:
+        description: Skip player playback when the required acceptance footage is unavailable
+        type: boolean
+        default: false
   push:
     branches: ['windows/**']
 permissions:
@@ -77,9 +82,15 @@ jobs:
             dist/*.blockmap
           key: ${{ steps.app-cache.outputs.cache-primary-key }}
       - name: Verify portable, fresh NSIS install, reinstall and real 1.80 upgrade
+        env:
+          HONGGUO_SKIP_PLAYBACK: ${{ inputs.skip_playback || false }}
         shell: pwsh
         run: |
-          node scripts/check-windows-release.cjs
+          if ($env:HONGGUO_SKIP_PLAYBACK -eq 'true') {
+            node scripts/check-windows-release.cjs --skip-playback
+          } else {
+            node scripts/check-windows-release.cjs
+          }
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/check-windows-installer.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

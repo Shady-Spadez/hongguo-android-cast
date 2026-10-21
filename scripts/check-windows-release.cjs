@@ -13,7 +13,8 @@ const packaged = path.join(root, 'dist/win-unpacked');
 const profile = path.join(temp, 'profile');
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(profile);
-const result = { version: pkg.version, hostPlatform: process.platform, hostArch: process.arch, signed: false, checks: [] };
+const skipPlayback = process.argv.includes('--skip-playback');
+const result = { version: pkg.version, hostPlatform: process.platform, hostArch: process.arch, signed: false, playbackTested: false, checks: [] };
 let child, socket, seq = 0;
 const pending = new Map();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -106,22 +107,25 @@ async function keyHandoff(key, code, expectedSource) {
   result.ffmpeg = execFileSync(ffmpeg, ['-version'], { encoding: 'utf8', windowsHide: true }).split('\n')[0];
   const mediaDir = path.join(temp, 'media');
   fs.mkdirSync(mediaDir);
-  const sample = path.join(mediaDir, 'windows-sample.mp4');
-  const response = await fetch('https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4');
-  assert(response.ok, 'CC0 fixture download failed');
-  const flower = Buffer.from(await response.arrayBuffer());
-  assert.equal(createHash('sha256').update(flower).digest('hex'), '0cd83d944a6ca7822b4a8306cecc60a36e859b041f6702c6a1ad9ead78924451');
-  const original = path.join(mediaDir, 'flower-original.mp4'); fs.writeFileSync(original, flower);
-  execFileSync(ffmpeg, ['-y', '-v', 'error', '-stream_loop', '2', '-i', original, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0', '-t', '15', '-vf', 'scale=640:360', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', sample], { timeout: 30000, windowsHide: true });
-  const probe = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_streams', '-of', 'json', sample], { encoding: 'utf8', windowsHide: true }));
-  assert(probe.streams.some(s => s.codec_name === 'h264'));
-  assert(probe.streams.some(s => s.codec_name === 'aac'));
-  result.checks.push('Bundled FFmpeg encodes H.264/AAC; FFprobe reads output');
   const sid = 'windows-smoke';
-  const secondSample = path.join(mediaDir, 'windows-sample-2.mp4');
-  fs.copyFileSync(sample, secondSample);
-  const fixtureEpisodes = [sample, secondSample].map((savePath, index) => ({ id: `fixture-${index + 1}`, status: 'completed', savePath, hongguoInfo: { series_id: sid, series_title: 'Windows verification', vid: `fixture-${index + 1}`, vid_index: index + 1 } }));
-  fs.writeFileSync(path.join(profile, 'data.json'), JSON.stringify({ settings: { root: mediaDir, watch_updates_enabled: false, watch_sequels_enabled: false }, tasks: fixtureEpisodes, series: [{ series_id: sid, series_title: 'Windows verification', episodes: fixtureEpisodes.map(task => ({ ...task.hongguoInfo, title: 'CC0 flower footage' })) }] }));
+  let fixtureEpisodes = [];
+  if (!skipPlayback) {
+    const sample = path.join(mediaDir, 'windows-sample.mp4');
+    const response = await fetch('https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4');
+    assert(response.ok, 'CC0 fixture download failed');
+    const flower = Buffer.from(await response.arrayBuffer());
+    assert.equal(createHash('sha256').update(flower).digest('hex'), '0cd83d944a6ca7822b4a8306cecc60a36e859b041f6702c6a1ad9ead78924451');
+    const original = path.join(mediaDir, 'flower-original.mp4'); fs.writeFileSync(original, flower);
+    execFileSync(ffmpeg, ['-y', '-v', 'error', '-stream_loop', '2', '-i', original, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-map', '0:v:0', '-map', '1:a:0', '-t', '15', '-vf', 'scale=640:360', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', sample], { timeout: 30000, windowsHide: true });
+    const probe = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_streams', '-of', 'json', sample], { encoding: 'utf8', windowsHide: true }));
+    assert(probe.streams.some(s => s.codec_name === 'h264'));
+    assert(probe.streams.some(s => s.codec_name === 'aac'));
+    result.checks.push('Bundled FFmpeg encodes H.264/AAC; FFprobe reads output');
+    const secondSample = path.join(mediaDir, 'windows-sample-2.mp4');
+    fs.copyFileSync(sample, secondSample);
+    fixtureEpisodes = [sample, secondSample].map((savePath, index) => ({ id: `fixture-${index + 1}`, status: 'completed', savePath, hongguoInfo: { series_id: sid, series_title: 'Windows verification', vid: `fixture-${index + 1}`, vid_index: index + 1 } }));
+  }
+  fs.writeFileSync(path.join(profile, 'data.json'), JSON.stringify({ settings: { root: mediaDir, watch_updates_enabled: false, watch_sequels_enabled: false }, tasks: fixtureEpisodes, series: skipPlayback ? [] : [{ series_id: sid, series_title: 'Windows verification', episodes: fixtureEpisodes.map(task => ({ ...task.hongguoInfo, title: 'CC0 flower footage' })) }] }));
   child = spawn(portable, ['--user-data-dir=' + profile, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=9439', '--autoplay-policy=no-user-gesture-required'], { stdio: 'ignore' });
   let target;
   for (let i = 0; i < 150; i++) {
@@ -153,6 +157,13 @@ async function keyHandoff(key, code, expectedSource) {
   assert.equal(hash(media.ffmpeg), hash(ffmpeg)); assert.equal(hash(media.ffprobe), hash(ffprobe));
   assert.notEqual(media.ffmpeg, ffmpeg, 'Must run the self-extracted portable EXE, not win-unpacked');
   result.checks.push('Single-file portable EXE opens; matching version; isolated profile; extracted media matches payload');
+  if (skipPlayback) {
+    assert(await evaluate('Array.from(document.querySelectorAll("video")).every(video => video.paused && !video.currentSrc)'), 'Playback skip must leave all video elements unloaded and paused');
+    result.skipReason = 'Playback verification explicitly skipped because the required user fixture is unavailable; no substitute footage was used.';
+    result.passed = true;
+    console.log('Windows release startup smoke: PASS (' + result.checks.length + ' checks; playback NOT TESTED)');
+    return;
+  }
   const qualityUi = await evaluate(`(async () => {
     const waitFor = async (check) => {
       for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise(r => setTimeout(r, 50)); }
@@ -321,8 +332,31 @@ async function keyHandoff(key, code, expectedSource) {
   await clickControl('退出全屏');
   await delay(2400);
   assert(await evaluate('!document.fullscreenElement && !document.querySelector("video").paused && getComputedStyle(document.querySelector(".player-controls")).opacity === "0"'), 'Ordinary landscape must hide idle controls after exiting fullscreen');
-  result.fullscreenControls = { idleHidden: true, pointerRestores: true, pausedVisible: true, resumedHidden: true, landscapeIdleHidden: true };
-  result.checks.push('Actual single-file EXE: fullscreen and ordinary landscape idle hide controls; pointer restores; pause keeps visible; resume hides');
+  const pointerPoints = await evaluate(`(() => {
+    const rect = document.querySelector('.player-stage').getBoundingClientRect();
+    const inside = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const outside = [{ x: 2, y: 2 }, { x: innerWidth - 2, y: 2 }, { x: 2, y: innerHeight - 2 }]
+      .find(p => p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom);
+    return { inside, outside };
+  })()`);
+  assert(pointerPoints.outside, 'Ordinary landscape must expose a point outside the player');
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...pointerPoints.inside });
+  await delay(250);
+  assert(await evaluate('getComputedStyle(document.querySelector(".player-controls")).opacity === "1"'), 'Ordinary landscape controls must be visible before pointer leave');
+  await evaluate('window.__pointerLeaveStarted = performance.now()');
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...pointerPoints.outside });
+  const pointerLeave = await evaluate(`(async () => {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const style = getComputedStyle(document.querySelector('.player-controls'));
+    return { elapsedMs: performance.now() - window.__pointerLeaveStarted, hidden: style.opacity === '0' && style.pointerEvents === 'none', playing: !document.querySelector('video').paused };
+  })()`);
+  assert(pointerLeave.elapsedMs < 1000 && pointerLeave.hidden && pointerLeave.playing, 'Leaving the player must finish hiding within one second while playback continues: ' + JSON.stringify(pointerLeave));
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...pointerPoints.inside });
+  await delay(250);
+  assert(await evaluate('getComputedStyle(document.querySelector(".player-controls")).opacity === "1"'), 'Returning to the ordinary landscape player must restore controls');
+  result.fullscreenControls = { idleHidden: true, pointerRestores: true, pausedVisible: true, resumedHidden: true, landscapeIdleHidden: true, landscapePointerLeave: pointerLeave, landscapePointerReturnRestores: true };
+  result.checks.push('Actual single-file EXE: fullscreen and ordinary landscape idle hide controls; landscape pointer leave hides within one second and return restores; pause keeps visible; resume hides');
+  result.playbackTested = true;
   result.passed = true;
   console.log('Windows release smoke: PASS (' + result.checks.length + ' checks)');
 })().catch(error => { result.passed = false; result.error = error.stack; console.error(error.stack); process.exitCode = 1; })

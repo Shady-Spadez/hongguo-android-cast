@@ -218,6 +218,30 @@ const source = transformSync(fs.readFileSync(path.join(__dirname, '../src/compon
   assert.ok(hidden(), 'window fill keeps controls hidden while auto-next prepares');
   props.continuing = false; props.autoContinue = true; media.ended = true; listeners.get('ended')?.(); render();
   assert.ok(!hidden(), 'failed auto-next restores controls even when the retained frame ended and later episodes exist');
+  props.autoContinue = false; props.available = true; media.ended = false; await media.play(); render();
+  const leavePointer = () => { stageListeners.get('pointerleave')?.(); render(); };
+  for (const mode of ['landscape', 'portrait', 'window-fill', 'fullscreen']) {
+    props.portrait = mode === 'portrait' || mode === 'window-fill';
+    props.windowFill = mode === 'window-fill';
+    document.fullscreenElement = mode === 'fullscreen' ? stage : null;
+    documentListeners.get('fullscreenchange')(); render();
+    movePointer(); assert.ok(!hidden());
+    leavePointer(); assert.ok(hidden(), `${mode}: leaving the player hides immediately without advancing time`);
+    advance(); render(); assert.ok(hidden(), `${mode}: the old idle timer cannot reveal controls after leaving`);
+    movePointer(); assert.ok(!hidden(), `${mode}: returning with real movement reveals controls`);
+    media.pause(); render(); leavePointer(); assert.ok(!hidden(), `${mode}: paused controls remain accessible on leave`);
+    await media.play(); render();
+    find('更多播放选项').props.onClick(); render(); leavePointer(); assert.ok(!hidden(), `${mode}: an open menu stays accessible on leave`);
+    find('更多播放选项').props.onClick(); render();
+    stageListeners.get('pointerdown')({ target: { closest: () => ({}) } }); render();
+    leavePointer(); assert.ok(!hidden(), `${mode}: leaving while dragging must not hide the slider`);
+    windowListeners.get('pointerup')(); advance(); render(); assert.ok(hidden());
+    keyboardFocus = true; stageListeners.get('focusin')({ target: find('暂停') }); render();
+    leavePointer(); assert.ok(!hidden(), `${mode}: keyboard focus remains visible on leave`);
+    keyboardFocus = false; stageListeners.get('focusout')(); advance(); render();
+    movePointer(); windowListeners.get('blur')(); render();
+    assert.ok(hidden(), `${mode}: leaving the app hides immediately without waiting for the idle timer`);
+  }
   props.available = false; render(); render(); assert.ok(!hidden(), 'unavailable media keeps controls visible');
   media.pause(); render();
 

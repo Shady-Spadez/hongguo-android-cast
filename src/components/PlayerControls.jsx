@@ -55,15 +55,17 @@ export default function PlayerControls({ danmaku, enhancement, shortcuts = DEFAU
     let timer;
     let pauseTimer;
     let dragging = false;
+    const hide = () => {
+      if (available && !media.paused && !menuOpen && !danmakuOpen && !dragging && !controlsRef.current?.querySelector(':focus-visible')) setControlsHidden(true);
+    };
     const scheduleHide = () => {
       clearTimeout(timer);
       if (available && !media.paused && !menuOpen && !danmakuOpen && !dragging) {
-        timer = setTimeout(() => {
-          if (!controlsRef.current?.querySelector(':focus-visible')) setControlsHidden(true);
-        }, 2000);
+        timer = setTimeout(hide, 2000);
       }
     };
     const reveal = () => { clearTimeout(pauseTimer); setControlsHidden(false); scheduleHide(); };
+    const onPointerLeave = () => { clearTimeout(timer); hide(); };
     const onKey = event => {
       const physicalKey = event.code || event.key;
       // Keep the release paired across source/effect changes, even if Shift is released first.
@@ -91,6 +93,7 @@ export default function PlayerControls({ danmaku, enhancement, shortcuts = DEFAU
       else scheduleHide();
     };
     stage?.addEventListener('pointermove', onPointerMove);
+    stage?.addEventListener('pointerleave', onPointerLeave);
     stage?.addEventListener('pointerdown', startDrag);
     stage?.addEventListener('focusin', onFocus);
     stage?.addEventListener('focusout', scheduleHide);
@@ -98,7 +101,7 @@ export default function PlayerControls({ danmaku, enhancement, shortcuts = DEFAU
     window.addEventListener('keyup', onKey, true);
     window.addEventListener('pointerup', stopDrag);
     window.addEventListener('pointercancel', stopDrag);
-    const onBlur = () => { episodeKeysRef.current.clear(); stopDrag(); };
+    const onBlur = () => { episodeKeysRef.current.clear(); stopDrag(); onPointerLeave(); };
     window.addEventListener('blur', onBlur);
     // Source changes and automatic handoffs are not user activity.
     if (menuOpen || danmakuOpen || (!continuing && !available)) reveal();
@@ -113,6 +116,7 @@ export default function PlayerControls({ danmaku, enhancement, shortcuts = DEFAU
       clearTimeout(timer);
       clearTimeout(pauseTimer);
       stage?.removeEventListener('pointermove', onPointerMove);
+      stage?.removeEventListener('pointerleave', onPointerLeave);
       stage?.removeEventListener('pointerdown', startDrag);
       stage?.removeEventListener('focusin', onFocus);
       stage?.removeEventListener('focusout', scheduleHide);

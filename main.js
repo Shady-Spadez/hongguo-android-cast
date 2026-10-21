@@ -367,9 +367,9 @@ app.on('login', (event, _webContents, _details, authInfo, callback) => {
 /** 统一入口：设置变化或启动时调用 */
 async function applyProxySettings(settings) {
   const resolved = resolveProxyConfig(settings);
-  applyProxyToEnv(resolved);
   try { await applyProxyToSession(resolved); }
-  catch (_) { console.error('[Proxy] 设置网络代理失败'); }
+  catch (_) { throw new Error('设置网络代理失败，请重试。'); }
+  applyProxyToEnv(resolved);
   console.log(`[Proxy] mode=${resolved.mode}`);
   return resolved;
 }
@@ -3881,75 +3881,90 @@ function createWindow() {
 
 // ===== 应用生命周期 =====
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
-  const dataFile = path.join(app.getPath('userData'), 'data.json');
-  store.init(dataFile);
-  loadDownloadTasks();
-  loadSeriesRegistry();
-  try { rebuildSeriesRegistryFromTasks(); } catch (_) { /* storage-error reports the failed write when the window opens. */ }
-  // 任务记录可能缺失（被清空/跨会话），从磁盘补回，保证下载列表与文件一致
-  try { rescanDownloadsFromDisk(); } catch (e) { console.warn('[Rescan] 启动补登记失败:', e.message); }
-  loadMergeTasks();
-  registerStreamProtocol();
-  registerLocalProtocol();
-  const settings = getCurrentSettings();
+  let startupStage = '读取本地数据';
+  try {
+    const dataFile = path.join(app.getPath('userData'), 'data.json');
+    store.init(dataFile);
+    loadDownloadTasks();
+    loadSeriesRegistry();
+    try { rebuildSeriesRegistryFromTasks(); } catch (_) { /* storage-error reports the failed write when the window opens. */ }
+    // 外置盘或网络盘可能阻塞同步扫描；分集访问按需查找，下载管理保留手动补登记。
+    loadMergeTasks();
+    registerStreamProtocol();
+    registerLocalProtocol();
+    const settings = getCurrentSettings();
 
-  // 代理必须在创建窗口、发起任何请求之前生效
-  await applyProxySettings(settings);
+    // 代理必须在创建窗口、发起任何请求之前生效
+    startupStage = '初始化网络';
+    let proxyDeadline;
+    try {
+      await Promise.race([
+        applyProxySettings(settings),
+        new Promise((_, reject) => { proxyDeadline = setTimeout(() => reject(new Error('Proxy startup timeout')), 15000); }),
+      ]);
+    } finally { clearTimeout(proxyDeadline); }
 
-  // 启动后自动接着跑「等待中」的任务（上次未下完的队列），无需手动点启动
-  // Automatic source retries scheduled before the app closed continue on the same schedule.
-  for (const task of downloadTasks) if (task.status === 'failed' && task.retryAt) armSourceRetry(task);
-  const resumed = enqueuePendingTasks();
-  if (resumed > 0) {
-    console.log(`[Queue] 启动自动续跑 ${resumed} 个等待中任务，并发 ${MAX_CONCURRENT_DOWNLOADS}`);
-    pumpQueue();
+    // 启动后自动接着跑「等待中」的任务（上次未下完的队列），无需手动点启动
+    // Automatic source retries scheduled before the app closed continue on the same schedule.
+    for (const task of downloadTasks) if (task.status === 'failed' && task.retryAt) armSourceRetry(task);
+    const resumed = enqueuePendingTasks();
+    if (resumed > 0) {
+      console.log(`[Queue] 启动自动续跑 ${resumed} 个等待中任务，并发 ${MAX_CONCURRENT_DOWNLOADS}`);
+      pumpQueue();
+    }
+
+    app.on('activate', () => {
+      stealth.setEnabled(false);
+      // 搜索窗口可能仍在后台，不能用所有窗口数量判断主窗口是否存在。
+      if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    });
+
+    if (process.platform === 'darwin') {
+      app.setAboutPanelOptions?.({ applicationVersion: APP_VERSION.replace(/^(\d+\.\d+)\.0$/, '$1'), version: '' });
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { label: APP_TITLE, submenu: [
+          { role: 'about', label: `关于${APP_TITLE}` },
+          { type: 'separator' },
+          { role: 'services', label: '服务' },
+          { type: 'separator' },
+          { role: 'hide', label: '隐藏' },
+          { role: 'hideOthers', label: '隐藏其他应用' },
+          { role: 'unhide', label: '显示全部' },
+          { type: 'separator' },
+          { role: 'quit', label: '退出' },
+        ] },
+        { label: '编辑', submenu: [
+          { role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' },
+          { type: 'separator' },
+          { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' },
+          { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' },
+        ] },
+        { label: '视图', submenu: [
+          { role: 'resetZoom', label: '实际大小' },
+          { role: 'zoomIn', label: '放大' }, { role: 'zoomOut', label: '缩小' },
+          { type: 'separator' }, { role: 'togglefullscreen', label: '全屏' },
+        ] },
+        { label: '窗口', submenu: [
+          { role: 'minimize', label: '最小化' }, { role: 'close', label: '关闭窗口' },
+          { type: 'separator' },
+          { label: '回到主窗口', accelerator: 'CmdOrCtrl+1', click: () => app.emit('activate') },
+          { label: '退出隐身小窗', click: () => stealth.setEnabled(false) },
+        ] },
+      ]));
+    }
+    startupStage = '创建主窗口';
+    createWindow();
+    setTimeout(() => { void refreshWatchHistory(); }, 10000).unref();
+    setInterval(() => { void refreshWatchHistory(); }, 15 * 60 * 1000).unref();
+  } catch (_) {
+    console.error(`[Startup] ${startupStage}失败`);
+    try {
+      dialog.showErrorBox(`${APP_TITLE}启动失败`, `未能完成${startupStage}。请退出后重试；若仍失败，请将此提示反馈给开发者。已有资料不会被清空。`);
+    } finally { app.quit(); }
   }
-
-  app.on('activate', () => {
-    stealth.setEnabled(false);
-    // 搜索窗口可能仍在后台，不能用所有窗口数量判断主窗口是否存在。
-    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  });
-
-  if (process.platform === 'darwin') {
-    app.setAboutPanelOptions?.({ applicationVersion: APP_VERSION.replace(/^(\d+\.\d+)\.0$/, '$1'), version: '' });
-    Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: APP_TITLE, submenu: [
-        { role: 'about', label: `关于${APP_TITLE}` },
-        { type: 'separator' },
-        { role: 'services', label: '服务' },
-        { type: 'separator' },
-        { role: 'hide', label: '隐藏' },
-        { role: 'hideOthers', label: '隐藏其他应用' },
-        { role: 'unhide', label: '显示全部' },
-        { type: 'separator' },
-        { role: 'quit', label: '退出' },
-      ] },
-      { label: '编辑', submenu: [
-        { role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' },
-        { type: 'separator' },
-        { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' },
-        { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' },
-      ] },
-      { label: '视图', submenu: [
-        { role: 'resetZoom', label: '实际大小' },
-        { role: 'zoomIn', label: '放大' }, { role: 'zoomOut', label: '缩小' },
-        { type: 'separator' }, { role: 'togglefullscreen', label: '全屏' },
-      ] },
-      { label: '窗口', submenu: [
-        { role: 'minimize', label: '最小化' }, { role: 'close', label: '关闭窗口' },
-        { type: 'separator' },
-        { label: '回到主窗口', accelerator: 'CmdOrCtrl+1', click: () => app.emit('activate') },
-        { label: '退出隐身小窗', click: () => stealth.setEnabled(false) },
-      ] },
-    ]));
-  }
-  createWindow();
-  setTimeout(() => { void refreshWatchHistory(); }, 10000).unref();
-  setInterval(() => { void refreshWatchHistory(); }, 15 * 60 * 1000).unref();
 });
 
 app.on('window-all-closed', () => {
