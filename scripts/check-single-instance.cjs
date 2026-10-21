@@ -13,7 +13,7 @@ function load(ownsLock, preview = false, options = {}) {
   const timers = new Map();
   const fixtureFs = Object.create(fs);
   fixtureFs.existsSync = file => {
-    if (options.slowDisk && String(file).startsWith('/isolated-slow-downloads')) {
+    if (options.slowDisk && path.resolve(String(file)).startsWith(path.resolve('/isolated-slow-downloads') + path.sep)) {
       events.push(['disk']);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
       return false;
