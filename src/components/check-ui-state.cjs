@@ -120,6 +120,72 @@ async function mount(file, api, props = {}) {
 (async () => {
   let failures = 0;
   const test = async (name, fn) => { if (process.argv[2] && !new RegExp(process.argv[2]).test(name)) return; try { await fn(); console.log(`PASS ${name}`); } catch (e) { failures++; console.error(`FAIL ${name}: ${e.stack}`); } };
+  await test('feed source switching recovers from failure and cancels stale lists and playback', async () => {
+    const custom = 'custom:550e8400-e29b-41d4-a716-446655440000';
+    const registry = deferred(), lateList = deferred(), latePlay = deferred(), requests = [], resolved = [], played = [];
+    let delayHongguo = false;
+    const ui = await mount('DramaFeed', {
+      getMediaSources: () => registry.promise,
+      browseList: request => {
+        requests.push(request);
+        if (request.source === 'hongguo') return delayHongguo
+          ? lateList.promise : Promise.resolve({ success: false, error: '红果连接失败' });
+        return Promise.resolve({ success: true, results: [
+          { series_id: request.source === 'xifan' ? 'xifan:drama:7' : `${custom}:8`, series_title: request.source === 'xifan' ? '西饭真实短剧' : '自定义真实短剧', rank: 1 },
+          { series_id: '123456', series_title: '混入的红果剧集' },
+        ] });
+      },
+      searchResolve: id => {
+        resolved.push(id);
+        if (id === 'xifan:drama:7') return latePlay.promise;
+        const data = detail(id); data.episodes[0].locked = true;
+        return Promise.resolve(ok(data));
+      },
+      playSeries: async request => { played.push(request); return { success: true }; },
+    });
+    await ui.flush();
+    assert.equal(ui.button('取消加载'), undefined, 'source registry loading must not expose an ineffective list cancellation');
+    registry.resolve({ success: true, sources: [
+      { id: 'hongguo', label: '红果短剧' }, { id: 'xifan', label: '西饭短剧' },
+      { id: 'hema', label: '河马短剧', enabled: false }, { id: custom, label: '测试片库' },
+    ] });
+    await ui.flush();
+    assert.ok(ui.text().includes('红果连接失败'));
+    const source = () => ui.find(n => n.props['aria-label'] === '推荐来源');
+    assert.ok(source(), 'failed feed must still expose source switching');
+    assert.equal(ui.find(n => n.type === 'option' && n.props.value === 'hema'), undefined, 'disabled sources stay hidden');
+    delayHongguo = true;
+    ui.button('重新加载').props.onClick(); await ui.flush();
+    source().props.onChange({ target: { value: 'xifan' } }); await ui.flush();
+    assert.ok(ui.text().includes('西饭真实短剧'));
+    assert.ok(ui.text().includes('西饭短剧'));
+    assert.ok(!ui.text().includes('榜单第 1 名'), 'directory order must not be presented as rankings');
+    assert.ok(!ui.text().includes('混入的红果剧集'));
+    assert.equal(requests.at(-1).source, 'xifan'); assert.equal(requests.at(-1).category, 'real-drama');
+    lateList.resolve({ success: true, results: [{ series_id: '654321', series_title: '过期的红果榜单', rank: 2 }] }); await ui.flush();
+    assert.ok(!ui.text().includes('过期的红果榜单'));
+    ui.button('在剧库播放').props.onClick(); await ui.flush();
+    source().props.onChange({ target: { value: custom } }); await ui.flush();
+    latePlay.resolve(ok(detail('xifan:drama:7'))); await ui.flush();
+    assert.equal(played.length, 0, 'switching sources must prevent a pending resolve opening the old player');
+    assert.ok(ui.text().includes('自定义真实短剧'));
+    assert.equal(ui.button('在剧库播放').props.disabled, false, 'switching source resets playback loading');
+    assert.equal(requests.at(-1).source, custom);
+    await ui.button('在剧库播放').props.onClick(); await ui.flush();
+    assert.equal(resolved.at(-1), `${custom}:8`, 'the new source ID must reach episode resolution');
+    assert.equal(played.length, 1);
+    assert.equal(played[0].seriesId, `${custom}:8`);
+    assert.equal(played[0].vidIndex, 2, 'the new source must open its first unlocked episode');
+    assert.equal(ui.button('在剧库播放').props.disabled, false);
+    assert.equal(ui.find(n => n.props.role === 'alert'), undefined, 'successful playback must not leave an error');
+    source().props.onChange({ target: { value: 'hongguo' } }); await ui.flush();
+    assert.ok(ui.text().includes('榜单第 2 名'), 'returning to Hongguo preserves real ranking metadata');
+    ui.button('漫剧').props.onClick(); await ui.flush();
+    assert.equal(requests.at(-1).category, 'hot-comic-drama');
+    ui.button('摇一摇').props.onClick(); await ui.flush();
+    assert.ok(ui.find(n => n.type?.name === 'RandomDrama'), 'random discovery remains available');
+    ui.unmount();
+  });
   await test('closing a loading detail ignores its late result', async () => {
     const pending = deferred();
     const ui = await mount('Browse', { getSeriesList: async () => [], browseCategories: async () => [], browseList: async () => ({ success: true, results: [{ series_id: 'A', series_title: 'A' }] }), searchResolve: () => pending.promise, getSeriesEpisodes: async () => ok(detail('A')) });

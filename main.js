@@ -1202,7 +1202,10 @@ ipcMain.handle('test-custom-source', async (_event,draft) => {
 
 ipcMain.handle('browse-list', (_event, options) =>
   require(String(options?.source).startsWith('custom:') ? './src/native/custom-source' : options?.source === 'hema' ? './src/native/hema'
-    : options?.source === 'xifan' ? './src/native/xifan' : './src/native/catalog').browseList(options));
+    : options?.source === 'xifan' ? './src/native/xifan' : './src/native/catalog').browseList(options, (authInfo, callback) => {
+      if (matchesProxyAuth(authInfo)) callback(activeProxyAuth.username, activeProxyAuth.password);
+      else callback();
+    }));
 
 ipcMain.handle('search-series', async (event, keyword, options = {}) => {
   const kw = String(keyword || '').trim();

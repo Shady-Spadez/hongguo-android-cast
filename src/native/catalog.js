@@ -1,9 +1,11 @@
 const axios = require('axios');
+const { net } = require('electron');
 
 const SITE = 'https://hongguoduanju.com';
 const CATEGORIES = new Set(['real-drama', 'comic-drama', 'ai-drama', 'comic']);
 const RANKINGS = new Set(['hot-drama', 'hot-real-drama', 'hot-comic-drama', 'hot-ai-drama']);
 const TIMEOUT_MS = 10000;
+const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 const CACHE_MS = 30000;
 const cache = new Map();
 const pending = new Map();
@@ -140,7 +142,47 @@ function parseRanking(html, category, page, sourceUrl) {
     genres: [], pageTitle: text(String(html).match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || ''), sourceUrl };
 }
 
-async function browseList(options = {}) {
+async function fetchCatalogPage(url, signal, proxyLogin) {
+  // Use the app's Chromium session, with proxy authentication but no site cookies.
+  if (!net?.request) return (await axios.get(url, {
+    timeout: TIMEOUT_MS, signal, responseType: 'text', maxContentLength: MAX_PAGE_BYTES,
+  })).data;
+  return new Promise((resolve, reject) => {
+    const request = net.request({ url, useSessionCookies: false, headers: { 'Cache-Control': 'no-cache' } });
+    let settled = false;
+    const finish = (error, html) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      if (error) { reject(error); request.abort(); }
+      else resolve(html);
+    };
+    const abort = () => finish(new Error('目录加载超时，请重试'));
+    signal.addEventListener('abort', abort, { once: true });
+    request.on('error', finish);
+    request.on('login', (auth, callback) => proxyLogin ? proxyLogin(auth, callback) : callback());
+    request.on('response', response => {
+      const status = response.statusCode;
+      if (status < 200 || status >= 300) return finish(new Error(`目录请求失败（HTTP ${status}）`));
+      if (Number(response.headers['content-length']) > MAX_PAGE_BYTES) return finish(new Error('目录页面过大，请稍后重试'));
+      const chunks = [];
+      let size = 0;
+      response.on('data', chunk => {
+        if (settled) return;
+        size += chunk.length;
+        if (size > MAX_PAGE_BYTES) return finish(new Error('目录页面过大，请稍后重试'));
+        chunks.push(chunk);
+      });
+      response.on('error', finish);
+      response.on('aborted', () => finish(new Error('目录连接被中断，请重试或切换来源')));
+      response.on('end', () => { if (!settled) finish(null, Buffer.concat(chunks, size).toString('utf8')); });
+    });
+    if (signal.aborted) abort();
+    else request.end();
+  });
+}
+
+async function browseList(options = {}, proxyLogin) {
   const { category = 'real-drama', genre = '', page = 1, forceRefresh = false } = options || {};
   const ranking = RANKINGS.has(category);
   if ((!CATEGORIES.has(category) && !ranking) || (genre && (!/^[a-z0-9-]+$/.test(genre) || ranking))) return { success: false, error: '无效的目录分类或题材' };
@@ -157,16 +199,17 @@ async function browseList(options = {}) {
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new Error('目录加载超时，请重试')); }, TIMEOUT_MS);
       });
-      const response = await Promise.race([axios.get(url, {
-        timeout: TIMEOUT_MS, signal: controller.signal, responseType: 'text', maxContentLength: 8 * 1024 * 1024,
-      }), timeout]);
-      const data = (ranking ? parseRanking : parseCatalog)(response.data, category, pg, url);
+      const html = await Promise.race([fetchCatalogPage(url, controller.signal, proxyLogin), timeout]);
+      const data = (ranking ? parseRanking : parseCatalog)(html, category, pg, url);
       cache.set(url, { expires: Date.now() + CACHE_MS, data });
       // Bound memory while retaining the latest category/filter pages.
       if (cache.size > 32) cache.delete(cache.keys().next().value);
       return data;
     } catch (error) {
-      return { success: false, error: controller.signal.aborted || error.code === 'ECONNABORTED' ? '目录加载超时，请重试' : error.message, sourceUrl: url };
+      const message = controller.signal.aborted || error.code === 'ECONNABORTED' ? '目录加载超时，请重试'
+        : /ECONNRESET|ERR_CONNECTION_RESET/.test(`${error.code} ${error.message}`)
+          ? '红果连接被中断，请重试或切换来源（ECONNRESET）' : error.message;
+      return { success: false, error: message, sourceUrl: url };
     } finally {
       clearTimeout(timer);
       pending.delete(url);

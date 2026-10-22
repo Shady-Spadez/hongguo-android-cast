@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
+const { Readable } = require('node:stream');
 const root = path.join(__dirname, '..');
 const file = path.join(root, 'src/native/catalog.js');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -12,7 +14,73 @@ const html = (category = 'real-drama', page = 1, list) => `<script>_ROUTER_DATA 
   pagination: { pageNum: page, total: 800, totalPages: 34 }, selectorList: [{ items: [{ selector_item_id: 'romance', show_name: '爱情' }] }],
 } } })};function runWindowFn(){throw Error('must not execute remote scripts')}</script>`;
 
+async function checkBrowserTransport() {
+  const calls = [];
+  let cancelled = false;
+  let respond = async () => new Response(html());
+  const context = { module: { exports: {} }, require: name => {
+    if (name === 'electron') return { net: { request: options => {
+      const request = new EventEmitter();
+      let body;
+      request.abort = () => { request.aborted = true; body?.destroy(); };
+      request.end = async () => {
+        try {
+          const response = await respond(options.url, options);
+          body = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
+          body.statusCode = response.status;
+          body.headers = Object.fromEntries(response.headers.entries());
+          request.emit('response', body);
+        } catch (error) { request.emit('error', error); }
+      };
+      calls.push({ url: options.url, options, request }); return request;
+    } } };
+    if (name === 'axios') return { get: async () => { throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); } };
+    return require(name);
+  }, Buffer, AbortController, URL, setTimeout: (fn, ms) => setTimeout(fn, ms === 10000 ? 40 : ms), clearTimeout };
+  vm.runInNewContext(fs.readFileSync(file, 'utf8'), context, { filename: file });
+  const { browseList } = context.module.exports;
+  const result = await browseList();
+  assert.equal(result.success, true, `目录应使用已配置系统代理的 Chromium 网络层，实际：${result.error}`);
+  assert.equal(result.results[0].series_title, '示例剧');
+  assert.equal(calls[0].url, 'https://hongguoduanju.com/category/real-drama');
+  assert.equal(calls[0].options.credentials, undefined, '允许代理认证，不通过 credentials 打开站点 Cookie');
+  assert.equal(calls[0].options.useSessionCookies, false, '公开目录不携带登录 Cookie');
+  assert.equal(calls[0].options.headers['Cache-Control'], 'no-cache', '目录刷新必须重新验证浏览器缓存');
+  let login;
+  await browseList({ forceRefresh: true }, (auth, callback) => { login = auth; callback('fixture-user', 'fixture-pass'); });
+  calls.at(-1).request.emit('login', { isProxy: true, host: '127.0.0.1', port: 1234 }, (user, password) => {
+    assert.equal(user, 'fixture-user'); assert.equal(password, 'fixture-pass');
+  });
+  assert.equal(login?.isProxy, true, 'Chromium 代理认证必须交给主进程匹配');
+
+  respond = async () => new Response('<article><h2 id="rank-title-1234567">热播测试</h2><a href="/detail?series_id=1234567">详情</a><span>1</span></article>');
+  const ranking = await browseList({ category: 'hot-drama' });
+  assert.equal(ranking.success, true);
+  assert.equal(ranking.results[0].series_title, '热播测试');
+
+  respond = async () => new Response('unavailable', { status: 503 });
+  assert.match((await browseList({ forceRefresh: true })).error, /503/);
+  respond = async () => new Response(html(), { headers: { 'content-length': String(8 * 1024 * 1024 + 1) } });
+  assert.equal((await browseList({ forceRefresh: true })).success, false, '声明过大的页面不能被接受');
+  respond = async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1)); },
+    cancel() { cancelled = true; },
+  }));
+  assert.equal((await browseList({ forceRefresh: true })).success, false, '无 Content-Length 的过大页面也应拒绝');
+  assert.equal(cancelled, true, '超过限额必须取消响应流');
+  respond = async () => { throw new Error('net::ERR_CONNECTION_RESET'); };
+  const reset = await browseList({ forceRefresh: true });
+  assert.equal(reset.success, false);
+  assert.match(reset.error, /切换来源/);
+  respond = async () => new Response(new ReadableStream({ start() {} }));
+  const timeout = await browseList({ forceRefresh: true });
+  assert.match(timeout.error, /超时/);
+  assert.equal(calls.at(-1).request.aborted, true);
+  console.log('PASS catalog Chromium transport: reset isolation, category/ranking, HTTP errors, bounded response and timeout');
+}
+
 async function main() {
+  await checkBrowserTransport();
   if (!fs.existsSync(file)) {
     // Exercise the old real queue, with comic navigation stalled and real-drama ready.
     const code = fs.readFileSync(path.join(root, 'main.js'), 'utf8');

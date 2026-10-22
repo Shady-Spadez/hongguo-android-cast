@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Film, Play, RefreshCw } from './icons';
 import RandomDrama, { DramaPoster } from './RandomDrama';
-import { playRecommendedDrama, waitForRequest } from './randomDramaModel.mjs';
+import useMediaSources from './useMediaSources';
+import { mediaSourceLabel } from './mediaSourcesModel.mjs';
+import { loadRandomPool, playRecommendedDrama, waitForRequest } from './randomDramaModel.mjs';
 import './DramaFeed.css';
 
 const RANKINGS = [
@@ -10,6 +12,8 @@ const RANKINGS = [
 ];
 
 function DramaFeed({ active = true, onNavigate }) {
+  const [source, setSource] = useState('hongguo');
+  const { sources: mediaSources, loading: sourcesLoading, error: sourcesError } = useMediaSources();
   const [category, setCategory] = useState('hot-drama');
   const [items, setItems] = useState([]);
   const [index, setIndex] = useState(0);
@@ -22,15 +26,38 @@ function DramaFeed({ active = true, onNavigate }) {
   const playController = useRef(null);
   const selected = items[index];
   const random = category === 'random';
+  const ranking = source === 'hongguo';
+  const sourceLabel = mediaSourceLabel(source, mediaSources);
+
+  const clearFeed = useCallback(() => {
+    listController.current?.abort(); playController.current?.abort();
+    setResolving(false); setPlayError(''); setItems([]); setIndex(0); setError(''); setLoading(false);
+  }, []);
+
+  const switchFeed = (nextSource, nextCategory) => {
+    if (source === nextSource && category === nextCategory) return;
+    clearFeed(); setSource(nextSource); setCategory(nextCategory);
+  };
 
   const loadList = useCallback(async (forceRefresh = false) => {
-    listController.current?.abort(); playController.current?.abort();
+    clearFeed();
+    if (!active || random || sourcesLoading || !mediaSources.some(item => item.id === source)) return;
     const controller = new AbortController();
     listController.current = controller;
-    setResolving(false); setPlayError(''); setItems([]); setIndex(0); setError(''); setLoading(true);
+    setLoading(true);
     try {
+      if (!ranking) {
+        const result = await loadRandomPool(options => window.electronAPI.browseList(options), {
+          source, sources: mediaSources, forceRefresh, signal: controller.signal,
+        });
+        if (!controller.signal.aborted) {
+          setItems(result.items);
+          if (!result.items.length) setError('这个来源暂未返回可用片单，可重试或切换来源。');
+        }
+        return;
+      }
       const result = await waitForRequest(window.electronAPI.browseList({
-        source: 'hongguo', category, page: 1, forceRefresh,
+        source, category, page: 1, forceRefresh,
       }), { signal: controller.signal, message: '热播榜加载超时，请重试' });
       if (controller.signal.aborted) return;
       if (!result?.success) throw new Error(result?.error || '热播榜暂时不可用');
@@ -41,17 +68,20 @@ function DramaFeed({ active = true, onNavigate }) {
         seen.add(id); return true;
       }));
     } catch (cause) {
-      if (!controller.signal.aborted) setError(cause.message || '热播榜加载失败，请重试');
+      if (!controller.signal.aborted) setError(cause.message || '片单加载失败，请重试或切换来源');
     } finally { if (!controller.signal.aborted) setLoading(false); }
-  }, [category]);
+  }, [active, random, sourcesLoading, mediaSources, source, ranking, category, clearFeed]);
 
   useEffect(() => {
-    if (active && !random) loadList();
+    clearFeed();
+    if (!sourcesLoading && !mediaSources.some(item => item.id === source)) {
+      setSource(mediaSources[0]?.id || ''); setCategory('hot-drama');
+    } else if (active && !random && !sourcesLoading) loadList();
     return () => { listController.current?.abort(); playController.current?.abort(); };
-  }, [active, random, loadList]);
+  }, [active, random, loadList, clearFeed, sourcesLoading, mediaSources, source]);
 
   const startItem = async () => {
-    if (!active || !selected || resolving) return;
+    if (!active || !selected || resolving || sourcesLoading) return;
     playController.current?.abort();
     const controller = new AbortController();
     playController.current = controller;
@@ -70,32 +100,40 @@ function DramaFeed({ active = true, onNavigate }) {
   const upcoming = items.slice(index + 1, index + 5);
   return <section className="drama-feed" aria-label="热播推荐">
     <header className="drama-feed-header">
-      <div><h2>热播推荐</h2><p className="page-description">顺着热播榜，遇见下一部故事。</p></div>
-      <button className="btn btn-outline" disabled={!random && loading} onClick={() => random ? setRandomRefresh(value => value + 1) : loadList(true)}><RefreshCw size={15} />刷新片单</button>
+      <div><h2>热播推荐</h2><p className="page-description">从热播榜和来源片单，遇见下一部故事。</p></div>
+      <div className="drama-feed-actions">
+        {!random && <label className="source-control">来源<select className="input-field" aria-label="推荐来源" value={source} onChange={event => switchFeed(event.target.value, 'hot-drama')}>
+          {mediaSources.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+        </select></label>}
+        <button className="btn btn-outline" disabled={!random && (loading || sourcesLoading || !source)} onClick={() => random ? setRandomRefresh(value => value + 1) : loadList(true)}><RefreshCw size={15} />刷新片单</button>
+      </div>
     </header>
     <div className="drama-feed-categories" role="group" aria-label="选择推荐方式">
-      {RANKINGS.map(([value, label]) => <button key={value} className={`browse-cat ${category === value ? 'active' : ''}`}
-        aria-pressed={category === value} onClick={() => setCategory(value)}>{label}</button>)}
-      <button className={`browse-cat drama-random-tab ${random ? 'active' : ''}`} aria-pressed={random} onClick={() => setCategory('random')}>摇一摇</button>
+      {ranking ? RANKINGS.map(([value, label]) => <button key={value} className={`browse-cat ${category === value ? 'active' : ''}`}
+        aria-pressed={category === value} onClick={() => switchFeed(source, value)}>{label}</button>)
+        : <button className={`browse-cat ${!random ? 'active' : ''}`} aria-pressed={!random} onClick={() => switchFeed(source, 'hot-drama')}>来源片单</button>}
+      <button className={`browse-cat drama-random-tab ${random ? 'active' : ''}`} aria-pressed={random} onClick={() => switchFeed(source, 'random')}>摇一摇</button>
     </div>
     {random ? <RandomDrama active={active} refreshKey={randomRefresh} onNavigate={onNavigate} /> : <>
-      <div className="drama-feed-list-meta"><p>红果公开热播榜{items.length > 0 ? ` · 本次 ${items.length} 部` : ''}</p><span>按来源榜单顺序</span></div>
-      {loading && <div className="drama-feed-state" role="status"><RefreshCw size={24} className="spin" /><p>正在加载真实热播片单…</p>
-        <button className="btn btn-outline" onClick={() => { listController.current?.abort(); setLoading(false); setError('已取消加载，可以重试或切换榜单。'); }}>取消加载</button>
+      {sourcesError && <p className="drama-feed-hint" role="status">来源列表更新失败，暂用上次列表；可在设置重新保存来源后重试。</p>}
+      <div className="drama-feed-list-meta"><p>{ranking ? '红果公开热播榜' : `${sourceLabel} · 来源片单`}{items.length > 0 ? ` · 本次 ${items.length} 部` : ''}</p><span>{ranking ? '按来源榜单顺序' : '按来源目录顺序，不代表热播排名'}</span></div>
+      {(loading || sourcesLoading) && <div className="drama-feed-state" role="status"><RefreshCw size={24} className="spin" /><p>{sourcesLoading ? '正在加载来源列表…' : '正在加载真实片单…'}</p>
+        {loading && !sourcesLoading && <button className="btn btn-outline" onClick={() => { listController.current?.abort(); setLoading(false); setError('已取消加载，可以重试或切换来源。'); }}>取消加载</button>}
       </div>}
-      {!loading && (error || !selected) && <div className="drama-feed-state" role={error ? 'alert' : 'status'}>
-        <Film size={32} /><h3>{error ? '暂时没能加载热播榜' : '这个榜单暂未返回剧集'}</h3>
+      {!loading && !sourcesLoading && (error || !selected) && <div className="drama-feed-state" role={error ? 'alert' : 'status'}>
+        <Film size={32} /><h3>{error ? '暂时没能加载片单' : !source ? '暂无启用的来源，请在设置中添加' : '这个来源暂未返回剧集'}</h3>
         {error && <p>{error}</p>}
-        <div className="drama-feed-actions"><button className="btn btn-primary" onClick={() => loadList(true)}>重新加载</button>
+        <p>可在上方切换来源，继续发现短剧。</p>
+        <div className="drama-feed-actions"><button className="btn btn-primary" disabled={!source} onClick={() => loadList(true)}>重新加载</button>
           {onNavigate && <button className="btn btn-outline" onClick={() => onNavigate('download')}>按剧名搜索</button>}</div>
       </div>}
-      {!loading && selected && <>
+      {!loading && !sourcesLoading && selected && <>
         <div className="drama-feed-feature">
           <DramaPoster item={selected} />
           <div className="drama-feed-copy">
-            <p className="drama-feed-rank">{selected.rank > 0 ? `榜单第 ${selected.rank} 名` : `本次片单第 ${index + 1} 部`}{selected.heat ? ` · ${selected.heat}` : ''}</p>
+            <p className="drama-feed-rank">{ranking && selected.rank > 0 ? `榜单第 ${selected.rank} 名` : `本次片单第 ${index + 1} 部`}{ranking && selected.heat ? ` · ${selected.heat}` : ''}</p>
             <h3>{selected.series_title}</h3>
-            <p className="drama-feed-tags">{[selected.episode_count > 0 && `${selected.episode_count} 集`, ...(selected.tags || [])].filter(Boolean).join(' · ') || '来自红果公开片单'}</p>
+            <p className="drama-feed-tags">{[selected.episode_count > 0 && `${selected.episode_count} 集`, ...(selected.tags || [])].filter(Boolean).join(' · ') || `来自${sourceLabel}片单`}</p>
             {typeof introduction === 'string' && introduction.trim() && <p className="drama-feed-intro">{introduction}</p>}
             <p className="drama-feed-play-note">在「我的剧库」选集、播放，接着上次继续看。</p>
             <div className="drama-feed-actions"><button className="btn btn-primary" disabled={resolving} onClick={startItem}><Play size={16} />{resolving ? '正在打开剧库…' : '在剧库播放'}</button>
@@ -112,10 +150,10 @@ function DramaFeed({ active = true, onNavigate }) {
         </div>
         {upcoming.length > 0 ? <div className="drama-feed-upcoming"><h4>接下来看看</h4><div className="drama-feed-upcoming-list">
           {upcoming.map((item, offset) => <button key={item.series_id} className="drama-feed-next" disabled={resolving} onClick={() => selectItem(index + offset + 1)}>
-            <DramaPoster item={item} /><span><strong>{item.series_title}</strong><small>{item.rank > 0 ? `榜单第 ${item.rank} 名` : `片单第 ${index + offset + 2} 部`}</small></span>
+            <DramaPoster item={item} /><span><strong>{item.series_title}</strong><small>{ranking && item.rank > 0 ? `榜单第 ${item.rank} 名` : `片单第 ${index + offset + 2} 部`}</small></span>
           </button>)}
-        </div></div> : <p className="drama-feed-hint">已到本次片单末尾，换个榜单，或摇一摇发现新故事。</p>}
-        <p className="drama-feed-source">榜单来自红果公开页面，不是账号个性化推荐。</p>
+        </div></div> : <p className="drama-feed-hint">已到本次片单末尾，换个来源，或摇一摇发现新故事。</p>}
+        <p className="drama-feed-source">{ranking ? '榜单来自红果公开页面，不是账号个性化推荐。' : `片单来自${sourceLabel}当前目录，不代表热播排名；播放以来源实际可用分集为准。`}</p>
       </>}
     </>}
   </section>;
