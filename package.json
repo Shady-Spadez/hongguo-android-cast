@@ -19,11 +19,25 @@
     "setup:ffmpeg:mac": "node scripts/setup-ffmpeg-mac.js",
     "build:mac": "node scripts/setup-ffmpeg-mac.js arm64 x64 && npm run build:react && electron-builder --mac dmg zip --arm64 --x64 --publish never",
     "build:mac:dir": "node scripts/setup-ffmpeg-mac.js arm64 x64 && npm run build:react && electron-builder --mac --arm64 --x64 --dir --publish never",
-    "test": "node scripts/test.cjs"
+    "test": "node scripts/test.cjs",
+    "build:android:ui": "node scripts/build-android-mac-source.mjs && vite build --config vite.android.config.mjs",
+    "build:android": "bash scripts/build-android.sh",
+    "build:android:tv:release-compatible": "bash scripts/build-android.sh --tv-release-compatible",
+    "build:android:tv:release": "bash scripts/build-android.sh --tv-release",
+    "build:android:phone:release-compatible": "bash scripts/build-android.sh --phone-release-compatible",
+    "build:android:phone:release": "bash scripts/build-android.sh --phone-release",
+    "check:android": "node --experimental-test-coverage --test scripts/check-android-source.test.mjs && node scripts/check-android-project.cjs",
+    "check:android:device": "node scripts/check-android-device.mjs",
+    "check:android:playback": "node scripts/check-android-playback.mjs",
+    "check:android:playback:ui": "bash scripts/check-android-playback-ui.sh",
+    "check:android:playback:device": "node scripts/check-android-playback-device.mjs",
+    "check:android:mobile": "node scripts/check-android-mobile-update.mjs"
   },
   "dependencies": {
     "anime4k-webgpu": "1.0.0",
     "axios": "1.20.0",
+    "buffer": "6.0.3",
+    "core-js": "3.51.0",
     "electron-updater": "6.8.9"
   },
   "devDependencies": {

@@ -80,3 +80,7 @@ dist-local/
 HANDOFF.md
 
 .local/
+
+# Generated browser bundle of the shared Mac App source
+src/android/generated/
+src/android/public/generated/startup-bootstrap.js

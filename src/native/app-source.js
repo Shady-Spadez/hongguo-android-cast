@@ -284,7 +284,7 @@ async function fetchAppPlayUrl(vid, options = {}) {
                     if (seen.has(identity)) continue;
                     seen.add(identity);
                     variants.push({ url, contentKey, codec: selected.codec === 'bytevc1' ? 'hevc' : selected.codec, source: 'app', vid,
-                        userAgent: VIDEO_UA, referer: 'https://novelquickapp.com/', quality: requestedQuality === 'auto' ? selected.quality : requestedQuality,
+                        userAgent: VIDEO_UA, referer: '', quality: requestedQuality === 'auto' ? selected.quality : requestedQuality,
                         ...(requestedQuality === 'auto' ? {} : { width: selected.width, height: selected.height }) });
                 } catch (error) { lastError = error; }
             }
