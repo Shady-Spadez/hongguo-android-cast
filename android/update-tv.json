@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "channel": "android-compatible",
+  "flavor": "tv",
+  "packageName": "io.github.jackotom.hongguo.android.tv",
+  "versionCode": 35,
+  "versionName": "0.12.12",
+  "minSdk": 26,
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.12/Hongguo-0.12.12-tv-release-compatible.apk",
+  "size": 499240,
+  "sha256": "16c8e13431c2fd2376c89009fa03031a729842f9ed128512d09d30ef7a06e006",
+  "notes": "新增红果官方账号登录、收藏与观看进度同步，保留本地记录；新增可选弹幕与官方分季关系；改善取源空响应、搜索和列表恢复；移除自建同步账号及 AirPlay；支持检查、校验并确认安装新版，修复安装来源权限返回续装。\n",
+  "publishedAt": "2026-10-26T22:02:04.250Z"
+}
