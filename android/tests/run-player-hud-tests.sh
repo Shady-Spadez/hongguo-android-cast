@@ -95,6 +95,9 @@ final class PlayerHudHarness extends HudActivityBase {
  final MainLoop main=new MainLoop();final Worker resolver=new Worker(),cacheWorker=new Worker();
  final View top=new View(),bottom=new View(),toggle=new View(),back=new View();VideoView video=new VideoView();
  boolean active,prepared,completed,userPaused,buffering,dragging,touchingControls,destroyed;int generation,hudDialogs,wakeKey=KeyEvent.KEYCODE_UNKNOWN,toggleCalls,seekCalls;Object qualitySwitch;
+ // Independent danmaku and install-lock lifecycle boundaries.
+ boolean registeredPlayer;static final java.util.concurrent.atomic.AtomicInteger LIVE_PLAYERS=new java.util.concurrent.atomic.AtomicInteger();
+ DanmakuLayer danmaku;static final class DanmakuLayer{void suspend(){}void close(){}}
  HUD_FIELD
  PlayerHudHarness(){installVideoTouch(video);HUD_SETUP video.requestFocus();}
  void sync(){HUD_SYNC}

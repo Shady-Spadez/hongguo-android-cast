@@ -39,6 +39,8 @@ final class PlaybackSources {
     private static final long WEB_FAILURE_NANOS = TimeUnit.MINUTES.toNanos(5);
     private static final int MAX_MEDIA_TRANSFERS = 16;
     private static final Set<String> LOOKUP_TRANSIENT_CODES = new HashSet<>(Arrays.asList("ENOTFOUND","EAI_AGAIN","ETIMEDOUT","ECONNABORTED","ECONNRESET","ECONNREFUSED","EHOSTUNREACH","ENETUNREACH","EPIPE"));
+    // A valid HTTP response without data may be retried, but does not prove a lower quality exists.
+    private static final String RESPONSE_RETRY_CODE = "APP_EMPTY_RESPONSE";
     private static final class AppLookupException extends IOException {
         final String code;
         AppLookupException(String message,String code){super(message);this.code=code;}
@@ -239,8 +241,13 @@ final class PlaybackSources {
             try {return resolveAppAttempt(sid,vid,requestedQuality,Math.min(14000,remaining));}
             catch(AppLookupException error) {
                 // Android 12 AddressCache retains negative DNS results for two seconds.
-                long delayMs=error.code.equals("ENOTFOUND")||error.code.equals("EAI_AGAIN")?2100:500;
-                if(!retryInitialLookup||attempt!=0||!LOOKUP_TRANSIENT_CODES.contains(error.code)||cancelled(error)||deadline-System.nanoTime()<=TimeUnit.MILLISECONDS.toNanos(delayMs))throw error;
+                long delayMs=RESPONSE_RETRY_CODE.equals(error.code)?700:error.code.equals("ENOTFOUND")||error.code.equals("EAI_AGAIN")?2100:500;
+                boolean retryable=LOOKUP_TRANSIENT_CODES.contains(error.code)||RESPONSE_RETRY_CODE.equals(error.code);
+                if(!retryInitialLookup||attempt!=0||!retryable||cancelled(error)||deadline-System.nanoTime()<=TimeUnit.MILLISECONDS.toNanos(delayMs)) {
+                    if(retryInitialLookup&&attempt>0&&RESPONSE_RETRY_CODE.equals(error.code))
+                        throw new AppLookupException(error.getMessage()+"（已重取1次仍未返回有效数据，请稍后重试）",error.code);
+                    throw error;
+                }
                 recoveryPause(delayMs);
             }
         }
@@ -273,7 +280,7 @@ final class PlaybackSources {
         String error=params.isNull("error")?"":params.optString("error","");
         if (!error.isEmpty()) {
             String code=params.optString("errorCode","");
-            request.future.completeExceptionally(new AppLookupException(error.length()>300?"App片源暂未取得":error,LOOKUP_TRANSIENT_CODES.contains(code)||code.equals("QUALITY_UNAVAILABLE")?code:""));
+            request.future.completeExceptionally(new AppLookupException(error.length()>300?"App片源暂未取得":error,LOOKUP_TRANSIENT_CODES.contains(code)||code.equals("QUALITY_UNAVAILABLE")||RESPONSE_RETRY_CODE.equals(code)||code.equals("APP_INVALID_RESPONSE")?code:""));
         }
         else {
             JSONObject info=params.getJSONObject("playInfo");
@@ -389,6 +396,7 @@ final class PlaybackSources {
             if (cause instanceof QualityUnavailableException) recoverable=true;
             else if (cause instanceof AppLookupException) {
                 String code=((AppLookupException)cause).code;
+                if(RESPONSE_RETRY_CODE.equals(code)||code.equals("APP_INVALID_RESPONSE"))return false;
                 if (code.equals("QUALITY_UNAVAILABLE") || LOOKUP_TRANSIENT_CODES.contains(code)) recoverable=true;
                 else return false;
             } else if (cause instanceof Exception && refreshableTransfer((Exception)cause)) recoverable=true;

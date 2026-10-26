@@ -14,7 +14,16 @@ import java.util.*;
 final class LibraryStore {
     private static final String SEARCH_KEY = "search_keywords_v1";
     private static final int SEARCH_LIMIT = 20;
-    interface HistoryAccess { JSONArray rows() throws JSONException; void record(JSONObject row) throws JSONException; }
+    interface HistoryAccess {
+        JSONArray rows() throws JSONException;
+        void record(JSONObject row) throws JSONException;
+        // Null preserves older history-only providers; official providers override with an isolated list.
+        default JSONArray favorites() throws JSONException { return null; }
+        default void toggleFavorite(JSONObject series) throws JSONException { throw new JSONException("此账号收藏暂不可用"); }
+        default int position(JSONObject series, JSONObject episode) throws JSONException { return -1; }
+        default JSONObject projection() throws JSONException { return null; }
+        default JSONObject seriesHistory(String seriesId) throws JSONException { return null; }
+    }
     interface HistoryFactory { HistoryAccess open(); }
     private static volatile HistoryFactory historyFactory;
     static void setHistoryFactory(HistoryFactory factory) { historyFactory=factory; }
@@ -145,9 +154,19 @@ final class LibraryStore {
         else editor.remove(SEARCH_KEY);
         return editor;
     }
-    JSONObject library() throws JSONException { synchronized (LibraryStore.class) { return new JSONObject().put("favorites", read("favorites")).put("history", historyRows()); } }
+    /** Synchronous disk barrier for application replacement; call only off the UI thread. */
+    static void checkpoint(Context context) throws IOException {
+        synchronized (LibraryStore.class) {
+            SharedPreferences prefs = context.getSharedPreferences("hongguo_library_v1", Context.MODE_PRIVATE);
+            // A new generation snapshots the entire current preference map, including pending apply writes.
+            if (!prefs.edit().putLong("update_checkpoint_at", System.currentTimeMillis()).commit())
+                throw new IOException("本机观看记录保存未完成，请稍后重试更新");
+        }
+    }
+    JSONObject library() throws JSONException { synchronized (LibraryStore.class) { JSONArray accountFavorites = accountHistory == null ? null : accountHistory.favorites(); JSONObject result = new JSONObject().put("favorites", accountFavorites == null ? read("favorites") : accountFavorites).put("history", historyRows()); JSONObject projection = accountHistory == null ? null : accountHistory.projection(); if (projection != null) result.put("projection", projection); return result; } }
     JSONObject toggle(JSONObject series) throws JSONException {
         synchronized (LibraryStore.class) {
+            if (accountHistory != null && accountHistory.favorites() != null) { accountHistory.toggleFavorite(series); return library(); }
             JSONArray old = read("favorites"), next = new JSONArray(); boolean found = false;
             for (int i = 0; i < old.length(); i++) { JSONObject row = old.optJSONObject(i); if (row == null) continue; if (series.getString("seriesId").equals(row.optString("seriesId"))) found = true; else next.put(row); }
             if (!found) { if (next.length() >= 200) throw new JSONException("收藏已达 200 部上限"); next.put(series); }
@@ -168,9 +187,19 @@ final class LibraryStore {
     }
     int position(JSONObject series, JSONObject episode) {
         synchronized (LibraryStore.class) {
+            if (accountHistory != null) try { int position = accountHistory.position(series, episode); if (position >= 0) return position; } catch (JSONException failure) { return 0; }
             JSONArray rows;try{rows=historyRows();}catch(JSONException ignored){return 0;}
             for (int i = 0; i < rows.length(); i++) { JSONObject row = rows.optJSONObject(i); if (row != null && row.optString("seriesId").equals(series.optString("seriesId")) && row.optString("vid").equals(episode.optString("vid"))) return (int) Math.min(Integer.MAX_VALUE, row.optLong("positionMs")); }
             return 0;
+        }
+    }
+    JSONObject seriesHistory(String seriesId) throws JSONException {
+        if (seriesId == null || !seriesId.matches("[0-9]{6,30}")) throw new JSONException("剧集身份无效");
+        synchronized (LibraryStore.class) {
+            if (accountHistory != null) { JSONObject direct = accountHistory.seriesHistory(seriesId); if (direct != null) return direct; }
+            JSONArray rows = historyRows();
+            for (int i=0;i<rows.length();i++) { JSONObject row=rows.optJSONObject(i); if (row!=null&&seriesId.equals(row.optString("seriesId"))) return new JSONObject(row.toString()); }
+            return null;
         }
     }
     JSONArray downloads() { synchronized (LibraryStore.class) { return read("downloads"); } }

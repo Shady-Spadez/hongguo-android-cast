@@ -192,7 +192,17 @@ function checkedUrl(value, domains) {
     return url.href;
 }
 
-async function requestJson(url, options, deadline, signal) {
+function responseError(response, stage, kind) {
+    const empty = kind === 'empty' || kind === 'null';
+    const label = stage === 'model_post' ? '模型' : '片源信息';
+    return Object.assign(new Error(`App ${label}接口${empty ? '返回空数据' : '返回了无效格式'}，请稍后重试`), {
+        code: empty ? 'APP_EMPTY_RESPONSE' : 'APP_INVALID_RESPONSE', status: response.status,
+        responseStage: stage, responseKind: kind,
+        responseBytes: typeof response.data === 'string' ? Buffer.byteLength(response.data, 'utf8') : 0,
+    });
+}
+
+async function requestJson(url, options, deadline, signal, stage) {
     const axios = require('axios');
     for (let redirects = 0; redirects < 4; redirects++) {
         url = checkedUrl(url, ['fqnovel.com', 'snssdk.com']);
@@ -219,8 +229,13 @@ async function requestJson(url, options, deadline, signal) {
             continue;
         }
         if (response.status !== 200) throw Object.assign(new Error(`App 片源请求失败（HTTP ${response.status}）`), { status: response.status });
-        const parsed = typeof response.data === 'string' ? jsonBody(response.data) : response.data;
-        if (!parsed || typeof parsed !== 'object') throw Object.assign(new Error('App 接口未返回有效数据'), { code: 'INVALID_RESPONSE' });
+        const body = response.data;
+        if (body == null || typeof body === 'string' && !body.trim()) throw responseError(response, stage, 'empty');
+        const parsed = typeof body === 'string' ? jsonBody(body) : body;
+        if (parsed === null && typeof body === 'string' && body.trim() === 'null') throw responseError(response, stage, 'null');
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw responseError(response, stage, parsed === null ? 'invalid_json' : 'non_object');
+        }
         return parsed;
     }
     throw Object.assign(new Error('App 片源跳转次数过多'), { code: 'SECURITY_BLOCKED' });
@@ -237,14 +252,14 @@ async function fetchAppPlayUrl(vid, options = {}) {
         mixed_video_id_map: { '1004': [vid] },
     });
     const signed = signedVideoRequest(payload);
-    const response = await requestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
+    const response = await requestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal, 'model_post');
     if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
     const entry = response.data?.[vid];
     const model = typeof entry?.video_model === 'string' ? jsonBody(entry.video_model) : entry?.video_model;
     if (!model) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: entry?.video_model ? 'INVALID_RESPONSE' : 'MISSING_MODEL' });
     const fallback = parseFallback(model.fallback_api);
     if (!fallback) throw Object.assign(new Error('App 接口未返回本集片源地址'), { code: 'MISSING_MODEL' });
-    const outer = await requestJson(fallback, { headers: { 'User-Agent': VIDEO_UA } }, deadline, signal);
+    const outer = await requestJson(fallback, { headers: { 'User-Agent': VIDEO_UA } }, deadline, signal, 'fallback_get');
     if ([outer, outer.video_info].some(value => Number(value?.Code || value?.code || 0) !== 0)) {
         throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
     }

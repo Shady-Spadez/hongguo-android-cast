@@ -16,6 +16,14 @@ import org.json.*;
 
 /** A single native player owns the whole queue; Back never dismisses a media popup first. */
 public final class PlayerActivity extends Activity {
+    private static final java.util.concurrent.atomic.AtomicInteger LIVE_PLAYERS = new java.util.concurrent.atomic.AtomicInteger();
+    private boolean registeredPlayer;
+    static boolean hasLivePlayer() { return LIVE_PLAYERS.get() > 0; }
+    private DanmakuController danmaku;
+    private DanmakuOverlay danmakuOverlay;
+    private Button danmakuButton;
+    private boolean danmakuEnabled;
+    private String danmakuNotice = "弹幕默认关闭，开启后只读匿名时间轴弹幕";
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService resolver = Executors.newSingleThreadExecutor();
     private Future<?> resolution;
@@ -108,6 +116,7 @@ public final class PlayerActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        LIVE_PLAYERS.incrementAndGet(); registeredPlayer = true;
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
@@ -136,6 +145,7 @@ public final class PlayerActivity extends Activity {
             cleanup = getIntent().getBooleanExtra("cleanupPlaybackCache", true);
             offline = getIntent().getBooleanExtra("download", false);
             JSONObject defaults = PlayerOptions.read(this);
+            danmakuEnabled = defaults.optBoolean("danmaku", false);
             quality = PlayerOptions.quality(state == null ? getIntent().getStringExtra("quality") == null ? defaults.getString("quality") : getIntent().getStringExtra("quality") : state.getString("quality", defaults.getString("quality")));
             actualQuality = state == null ? quality : PlayerOptions.quality(state.getString("actualQuality", quality));
             requestedSpeed = PlayerOptions.speed(state == null ? getIntent().getDoubleExtra("speed", defaults.getDouble("speed")) : state.getDouble("speed", defaults.getDouble("speed")));
@@ -164,6 +174,12 @@ public final class PlayerActivity extends Activity {
         video = new VideoView(this); video.setFocusable(true); video.setFocusableInTouchMode(true);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         installVideoTouch(video);
+        danmakuOverlay = new DanmakuOverlay(this, new DanmakuOverlay.Clock() {
+            public long position() { return prepared && video != null ? Math.max(0, video.getCurrentPosition()) : Math.max(0, resumeAt); }
+            public boolean playing() { return active && prepared && !completed && !userPaused && !buffering && !dragging && !casting() && !castWasActive && video != null && video.isPlaying(); }
+        });
+        root.addView(danmakuOverlay, new FrameLayout.LayoutParams(-1, -1));
+        danmaku = new DanmakuController(this, main, danmakuOverlay, value -> { danmakuNotice = value; updateDanmakuButton(); });
         top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL); top.setPadding(dp(8), dp(8), dp(8), dp(8)); top.setBackgroundColor(0xbb101014);
         back = button("‹ 返回", this::exitPlayer);
         top.addView(back, new LinearLayout.LayoutParams(dp(86), dp(48)));
@@ -207,6 +223,8 @@ public final class PlayerActivity extends Activity {
         qualityButton = button("清晰度 自动", this::selectQuality); speedButton = button("倍速 1×", this::selectSpeed);
         options.addView(qualityButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         options.addView(speedButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        danmakuButton = button("弹幕 关", this::toggleDanmaku);
+        options.addView(danmakuButton, new LinearLayout.LayoutParams(0, dp(46), 1)); updateDanmakuButton();
         content.addView(options); phoneOptions = BuildConfig.IS_TV ? null : options;
         root.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
         setContentView(root);
@@ -275,9 +293,15 @@ public final class PlayerActivity extends Activity {
             for (int i = start; i < Math.min(episodeActions.length, start + layout.columns); i++) addPhoneButton(row, episodeActions[i], layout.buttonHeight, true);
             phoneActions.addView(row, new LinearLayout.LayoutParams(-1, -2));
         }
-        phoneOptions.removeAllViews(); phoneOptions.setOrientation(layout.optionColumns == 1 ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
-        addPhoneButton(phoneOptions, qualityButton, layout.buttonHeight, layout.optionColumns == 2);
-        addPhoneButton(phoneOptions, speedButton, layout.buttonHeight, layout.optionColumns == 2);
+        phoneOptions.removeAllViews(); phoneOptions.setOrientation(LinearLayout.VERTICAL);
+        // Keep existing long quality/speed labels at their original half-width.
+        // Danmaku gets a separate phone row instead of squeezing all three into thirds.
+        LinearLayout mediaOptions = new LinearLayout(this);
+        mediaOptions.setOrientation(layout.optionColumns == 1 ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        addPhoneButton(mediaOptions, qualityButton, layout.buttonHeight, layout.optionColumns == 2);
+        addPhoneButton(mediaOptions, speedButton, layout.buttonHeight, layout.optionColumns == 2);
+        phoneOptions.addView(mediaOptions, new LinearLayout.LayoutParams(-1, -2));
+        addPhoneButton(phoneOptions, danmakuButton, layout.buttonHeight, false);
         top.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         phoneContent.measure(View.MeasureSpec.makeMeasureSpec(contentWidth, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int maxHeight = layout.controlsHeight(availableHeight, (int) Math.ceil(phoneContent.getMeasuredHeight() / density),
@@ -470,6 +494,7 @@ public final class PlayerActivity extends Activity {
             else localWindow.moveTo(current);
         }
         final int previousToken = generation, token = ++generation; final String targetQuality = actualQuality;
+        if (danmaku != null) danmaku.suspend();
         final PlaybackCache.QueueWindow targetWindow = localWindow;
         discardPendingMedia();
         if (recovering) recoveryBudget.carry(previousToken, token); else { recoveryBudget.reset(token); lastMediaError = null; }
@@ -749,6 +774,29 @@ public final class PlayerActivity extends Activity {
             .setNeutralButton("选集", (dialog, which) -> selectEpisode()).setNegativeButton("返回", (dialog, which) -> exitPlayer())
             .setOnCancelListener(dialog -> exitPlayer()).create());
     }
+    private void updateDanmakuButton() {
+        if (danmakuButton == null) return;
+        String value = !danmakuEnabled ? "关" : offline ? "离线停用" : casting() || castWasActive ? "投屏停用" : danmakuNotice.contains("未载入") ? "未载入" : danmakuNotice.contains("正在") ? "读取中" : danmakuNotice.contains("暂无") ? "本段无" : "开";
+        danmakuButton.setText("弹幕 " + value);
+        danmakuButton.setContentDescription("时间轴弹幕：" + value + "；" + danmakuNotice + "；点击" + (danmakuEnabled ? "关闭" : "开启"));
+    }
+    private void toggleDanmaku() {
+        try {
+            danmakuEnabled = PlayerOptions.update(this, new JSONObject().put("danmaku", !danmakuEnabled)).getBoolean("danmaku");
+            danmakuNotice = danmakuEnabled ? "正在读取弹幕…" : "弹幕已关闭";
+            updateDanmaku(); updateDanmakuButton();
+            Toast.makeText(this, danmakuEnabled ? offline ? "已下载播放不读取在线弹幕" : casting() || castWasActive ? "投屏不显示本机弹幕" : "已开启时间轴弹幕，暂停和拖动跟随视频" : "弹幕已关闭", Toast.LENGTH_SHORT).show();
+        } catch (Exception error) { Toast.makeText(this, "弹幕设置保存未成功", Toast.LENGTH_LONG).show(); }
+    }
+    private void updateDanmaku() {
+        if (danmaku == null || video == null || series == null || episode == null) return;
+        try {
+            long position = prepared ? Math.max(0, video.getCurrentPosition()) : Math.max(0, resumeAt);
+            boolean local = active && prepared && !offline && !casting() && !castWasActive;
+            danmaku.update(series.optString("seriesId"), episode.optString("vid"), generation, position,
+                Math.max(1, video.getDuration()), local, danmakuEnabled); updateDanmakuButton();
+        } catch (RuntimeException ignored) { danmaku.suspend(); } // A decoder transition never turns a comment error into playback failure.
+    }
     private void move(int delta) { if (current + delta >= 0 && current + delta < queue.size()) loadAt(current + delta, null, 0); }
     private void selectEpisode() {
         String[] labels = new String[queue.size()];
@@ -806,6 +854,7 @@ public final class PlayerActivity extends Activity {
     private static String format(int millis) { int seconds = Math.max(0, millis / 1000); return String.format(Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60); }
     private final Runnable tick = new Runnable() { public void run() {
         if (destroyed) return;
+        updateDanmaku();
         if (casting()) { renderCastControls(); main.postDelayed(this, 500); return; }
         if (prepared && !dragging) {
             lastGoodPosition = Math.max(0, video.getCurrentPosition());
@@ -1204,10 +1253,12 @@ public final class PlayerActivity extends Activity {
         if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) { showControls(); toggle.requestFocus(); return true; }
         return super.onKeyDown(key, event);
     }
-    @Override protected void onPause() { active = false; touchingControls = false; wakeKey = KeyEvent.KEYCODE_UNKNOWN; if (controlsHud != null) controlsHud.suspend(); saveProgress(); if (!casting() && video != null && prepared) video.pause(); super.onPause(); }
+    @Override protected void onPause() { active = false; if (danmaku != null) danmaku.suspend(); touchingControls = false; wakeKey = KeyEvent.KEYCODE_UNKNOWN; if (controlsHud != null) controlsHud.suspend(); saveProgress(); if (!casting() && video != null && prepared) video.pause(); super.onPause(); }
     @Override protected void onResume() { super.onResume(); active = true; if (!casting() && prepared && !completed && !userPaused) video.start(); showControls(); }
     @Override protected void onSaveInstanceState(Bundle state) { savePlaybackState(state); super.onSaveInstanceState(state); }
     @Override protected void onDestroy() {
+        if (registeredPlayer) { registeredPlayer = false; LIVE_PLAYERS.decrementAndGet(); }
+        if (danmaku != null) danmaku.close();
         detachCast();
         if (controlsHud != null) controlsHud.destroy();
         cancelQualitySwitch(); destroyed = true; ++generation; discardPendingMedia(); main.removeCallbacksAndMessages(null);

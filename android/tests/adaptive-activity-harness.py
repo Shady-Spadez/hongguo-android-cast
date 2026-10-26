@@ -54,6 +54,8 @@ final class AdaptiveActivityHarness {
  JSONObject series,episode,queueSeries,protectedEpisode;String protectedSeriesId="",queueIdentity="";PlaybackCache.QueueWindow localWindow,protectedWindow;boolean cleanup=true;final List<JSONObject>queue=new ArrayList<>();int current,generation=7,resumeAt,lastGoodPosition,qualitySerial,videoWidth,videoHeight;
  boolean destroyed,offline,autoplay,prepared,completed,userPaused,active=true,protectedCurrent,currentManual,currentCache,currentWeb,buffering,castWasActive;
  int loads,loadedAt,loadedPosition,errors,updates,saves,prunes;Uri manualFile;AlertDialog dialog;
+ // Danmaku is an independent display boundary, certified by DanmakuControllerTest.
+ DanmakuLayer danmaku;static final class DanmakuLayer{void suspend(){}}
  NESTED
  MODERN_FIELD
  AdaptiveActivityHarness()throws Exception{series=new JSONObject().put("seriesId","123").put("title","fixture");for(int i=1;i<=3;i++)queue.add(new JSONObject().put("vid","v"+i).put("index",i));episode=queue.get(0);MODERN_INIT}

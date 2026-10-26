@@ -218,3 +218,6 @@
 .tv-layout .account-form input{min-height:56px;font-size:19px}
 .tv-layout .account-section .account-note{font-size:17px}
 .tv-layout .account-section button,.tv-layout .account-section input{scroll-margin-block:36px}
+
+/* Refresh feedback stays beside the last successful list, not over it. */
+.state-inline{display:flex;align-items:center;gap:10px;margin:12px 0 18px;padding:12px 14px;border:1px solid var(--border);border-radius:7px;background:var(--surface);min-width:0}.state-inline>svg{flex-shrink:0;color:var(--muted)}.state-inline>p{flex:1;min-width:0;font-size:13px;overflow-wrap:anywhere}.state-inline>p strong,.state-inline>p span{display:block}.state-inline>p strong{font-weight:600;color:var(--text)}.state-inline.error-state>p span{color:var(--error)}.state-inline>.button{flex-shrink:0}.tv-layout .state-inline>p{font-size:17px}@media(max-width:359px){.state-inline{flex-wrap:wrap}.state-inline>.button{margin-left:auto}}

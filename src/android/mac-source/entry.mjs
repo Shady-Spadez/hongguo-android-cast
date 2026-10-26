@@ -2,8 +2,9 @@ import desktopAppSource from '../../native/app-source.js';
 import desktopQuality from '../../native/download-quality.js';
 import { setNativeCall } from './axios-native.mjs';
 const TRANSIENT_LOOKUP_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE']);
+const RESPONSE_LOOKUP_CODES = new Set(['APP_EMPTY_RESPONSE', 'APP_INVALID_RESPONSE']);
 
-/** The protocol, signatures, Spade parsing and quality selection come from the unmodified Mac module. */
+/** Protocol, signatures, Spade parsing and quality selection use the shared Mac module. */
 export async function fetchAppPlayUrl(vid, options = {}) {
   const quality = desktopQuality.normalizeDownloadQuality(options.quality);
   let info;
@@ -36,7 +37,7 @@ export function registerAppResolver(nativeCall) {
   }).then(
     playInfo => nativeCall('appResolveResult', { requestId, seriesId, vid, requestedQuality: quality, playInfo }),
     error => nativeCall('appResolveResult', { requestId, seriesId, vid, requestedQuality: quality, error: error?.message || 'App 片源暂不可用',
-      ...(TRANSIENT_LOOKUP_CODES.has(error?.code) || error?.code === 'QUALITY_UNAVAILABLE' ? { errorCode: error.code } : {}) }),
+      ...(TRANSIENT_LOOKUP_CODES.has(error?.code) || RESPONSE_LOOKUP_CODES.has(error?.code) || error?.code === 'QUALITY_UNAVAILABLE' ? { errorCode: error.code } : {}) }),
   ).catch(() => undefined);
   window.__androidAppResolve = handler;
   return () => { if (window.__androidAppResolve === handler) delete window.__androidAppResolve; };
