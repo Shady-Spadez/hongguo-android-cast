@@ -3,12 +3,12 @@
   "channel": "android-compatible",
   "flavor": "phone",
   "packageName": "io.github.jackotom.hongguo.android",
-  "versionCode": 35,
-  "versionName": "0.12.12",
+  "versionCode": 36,
+  "versionName": "0.12.13",
   "minSdk": 26,
-  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.12/Hongguo-0.12.12-phone-release-compatible.apk",
-  "size": 500944,
-  "sha256": "d2c10af03bfc09543aa5de17ccd8bd857214921302c6d4694afe426f4cf11082",
-  "notes": "新增红果官方账号登录、收藏与观看进度同步，保留本地记录；新增可选弹幕与官方分季关系；改善取源空响应、搜索和列表恢复；移除自建同步账号及 AirPlay；支持检查、校验并确认安装新版，修复安装来源权限返回续装。\n",
-  "publishedAt": "2026-10-26T22:02:03.968Z"
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.13/Hongguo-0.12.13-phone-release-compatible.apk",
+  "size": 504036,
+  "sha256": "6ef88ea16e2ce0efc6967881477e20a9d8c9adab7476f60dd28ec2e47c2a9731",
+  "notes": "完善红果账号与同步：发码结果不确定时可输入已收到的验证码；修复MFA票据与期限；游客收藏和历史同时导入；播放中定时保存进度并同步真实时长；修复旧剧收藏刷新、会话刷新丢失和同步状态卡住，增强切号隔离。\n",
+  "publishedAt": "2026-10-26T23:45:57.940Z"
 }
