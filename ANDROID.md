@@ -4,10 +4,16 @@
 
 ## 安装包
 
-- 手机：`dist/android/Hongguo-0.12.13-phone-release-compatible.apk`
-- 电视 / 盒子：`dist/android/Hongguo-0.12.13-tv-release-compatible.apk`
+- 手机：`dist/android/Hongguo-0.12.14-phone-release-compatible.apk`
+- 电视 / 盒子：`dist/android/Hongguo-0.12.14-tv-release-compatible.apk`
 - 系统：Android 8.0（API 26）或更新版本；使用设备系统 WebView 和原生视频解码器。
-- 两个 flavor 使用不同应用 ID，可以同时安装。手机与 TV 更新为 `0.12.13`/code36 release-compatible 包（当前桌面源码基线为 `2.3.0`；保留 0.12.5 已移植的上游 2.4 取源兼容修复，不整体升级桌面版）。两者均为真正的 release 构建，`debuggable=false`，不是 debug 包改名；`release-compatible` 使用与各自原 debug 包相同的本机签名证书，应用 ID 不变，便于覆盖安装保留记录。这不是独立生产签名。
+- 两个 flavor 使用不同应用 ID，可以同时安装。手机与 TV 更新为 `0.12.14`/code37 release-compatible 包（当前桌面源码基线为 `2.3.0`；保留 0.12.5 已移植的上游 2.4 取源兼容修复，不整体升级桌面版）。两者均为真正的 release 构建，`debuggable=false`，不是 debug 包改名；`release-compatible` 使用与各自原 debug 包相同的本机签名证书，应用 ID 不变，便于覆盖安装保留记录。这不是独立生产签名。
+
+## 0.12.14 更新缓存状态修复
+
+- 修复已覆盖安装同版后，启动恢复先赋候选、校验拒绝后未清候选造成的“更新包已验证，可继续安装”误报。
+- 缓存仅在完整校验成功后进入ready；已安装同版、降版、坏包、签名异常和过期缓存不恢复可安装状态，清除残留安装标记。有效新版缓存和权限返回续装仍保留。
+- 沿用既有证书与在线渠道，保留0.12.13资产，不替换同一versionCode的APK。
 
 ## 0.12.13 账号与同步复查
 

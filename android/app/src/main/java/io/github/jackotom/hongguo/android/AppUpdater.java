@@ -112,14 +112,15 @@ final class AppUpdater {
                 directory.mkdirs(); partial.delete();
                 String saved = prefs.getString("manifest", "");
                 if (!saved.isEmpty() && apk.isFile() && System.currentTimeMillis() - apk.lastModified() <= UpdatePolicy.CHECK_INTERVAL) {
-                    restored = Candidate.parse(new JSONObject(saved), installedCode, installedName); verify(restored, apk);
+                    Candidate parsed = Candidate.parse(new JSONObject(saved), installedCode, installedName);
+                    verify(parsed, apk); restored = parsed;
                 } else apk.delete();
-            } catch (Exception invalid) { apk.delete(); }
+            } catch (Exception invalid) { restored = null; apk.delete(); }
             final Candidate result = restored;
             finish(operation, () -> {
                 busy = false; candidate = result; verifiedCandidate = result;
                 if (result != null) { state = "ready"; downloaded = result.bytes; message = "更新包已验证，可继续安装"; }
-                else { prefs.edit().remove("manifest").remove("waiting_permission").apply(); state = "idle"; message = "尚未检查更新"; }
+                else { prefs.edit().remove("manifest").remove("waiting_permission").apply(); downloaded = 0; state = "idle"; message = "尚未检查更新"; }
                 publish();
                 if (prefs.getBoolean("waiting_permission", false) && foreground) resume();
                 else if (result == null && UpdatePolicy.automaticCheckDue(System.currentTimeMillis(), prefs.getLong("last_auto_attempt", 0))) check(false);
