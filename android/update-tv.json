@@ -3,12 +3,12 @@
   "channel": "android-compatible",
   "flavor": "tv",
   "packageName": "io.github.jackotom.hongguo.android.tv",
-  "versionCode": 38,
-  "versionName": "0.12.15",
+  "versionCode": 39,
+  "versionName": "0.12.16",
   "minSdk": 26,
-  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.15/Hongguo-0.12.15-tv-release-compatible.apk",
-  "size": 507308,
-  "sha256": "a31c7d0fc2f2da8b1f69d77769f162b72dab73711760458dde8f9eaa517d5db4",
-  "notes": "新增离线视频删除：下载页每集提供“删除”，未完成的系统下载可“取消并删除”；二次确认后移除该集文件及本机下载记录，支持损坏、丢失文件与失败重试。\n删除时保护播放、投屏及媒体准备任务；兼容旧下载记录，校验文件归属，防止迟到刷新让已删除项目重新出现。\n收藏、观看进度、红果账号同步及播放缓存保持；手机和 TV 均支持确认、取消及返回键操作。\n",
-  "publishedAt": "2026-10-27T00:52:12.154Z"
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.16/Hongguo-0.12.16-tv-release-compatible.apk",
+  "size": 512964,
+  "sha256": "71e4bcdab681eebdf42552c86a292d69d609da9c2816c39bff4d7a0123288e59",
+  "notes": "播放失败自动恢复：初次取源和播放中断先自动重新取源一次，仍失败后按真实视频尺寸尝试720p、480p、360p低档，不再回到可能选中高画质的自动档。\n保留同一集的播放位置、暂停和已确认倍速；降档只影响播放会话，不覆盖首选清晰度。增加准备/持续缓冲超时保护，避免旧回调覆盖新一集。\n低档模型与解码尺寸均校验上限，缓存按分辨率边界隔离；手动下载维持严格首选，离线文件不转网络、不删除。下载删除、收藏、观看进度与账号同步保持。\n",
+  "publishedAt": "2026-10-27T01:26:02.734Z"
 }
