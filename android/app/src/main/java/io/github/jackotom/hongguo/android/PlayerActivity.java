@@ -1277,11 +1277,13 @@ public final class PlayerActivity extends Activity {
     @Override protected void onResume() { super.onResume(); active = true; if (!casting() && prepared && !completed && !userPaused) video.start(); showControls(); }
     @Override protected void onSaveInstanceState(Bundle state) { savePlaybackState(state); super.onSaveInstanceState(state); }
     @Override protected void onDestroy() {
-        if (registeredPlayer) { registeredPlayer = false; LIVE_PLAYERS.decrementAndGet(); }
+        // Keep file deletion/update blocked until all media handles have been released.
         if (danmaku != null) danmaku.close();
         detachCast();
         if (controlsHud != null) controlsHud.destroy();
         cancelQualitySwitch(); destroyed = true; ++generation; discardPendingMedia(); main.removeCallbacksAndMessages(null);
-        if (video != null) video.stopPlayback(); releaseCurrent(); closeLocalWindow(); resolver.shutdownNow(); cacheWorker.shutdownNow(); super.onDestroy();
+        if (video != null) video.stopPlayback(); releaseCurrent(); closeLocalWindow(); resolver.shutdownNow(); cacheWorker.shutdownNow();
+        if (registeredPlayer) { registeredPlayer = false; LIVE_PLAYERS.decrementAndGet(); }
+        super.onDestroy();
     }
 }

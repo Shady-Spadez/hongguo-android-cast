@@ -218,6 +218,11 @@ final class LibraryStore {
     void addDownload(long id, JSONObject series, JSONObject episode) throws JSONException {
         addDownload(id, series, episode, null);
     }
+    void addManagedDownload(long id, JSONObject series, JSONObject episode, String filename) throws Exception {
+        JSONObject row = new JSONObject().put("series",series).put("episode",episode);
+        if (filename==null || !filename.matches(java.util.regex.Pattern.quote(preparedPrefix(row))+"[0-9]{10,17}\\.mp4")) throw new IOException("下载文件名无效");
+        addDownload(id,series,episode,new JSONObject().put("downloadFile",filename));
+    }
     void addPreparedDownload(long id, JSONObject series, JSONObject episode, File directory, File target) throws Exception {
         JSONObject row = new JSONObject().put("series",series).put("episode",episode);
         JSONObject metadata = preparedMetadata(directory,row,target);
@@ -228,7 +233,8 @@ final class LibraryStore {
             JSONArray old = read("downloads"), next = new JSONArray();
             if (old.length() >= 200) throw new JSONException("下载记录已达 200 条上限");
             JSONObject row = new JSONObject().put("id", id).put("title", series.getString("title")).put("index", episode.getInt("index")).put("series", series).put("episode", episode);
-            if (prepared != null) row.put("preparedFile",prepared.getString("preparedFile")).put("preparedBytes",prepared.getLong("preparedBytes"));
+            if (prepared != null && prepared.has("preparedFile")) row.put("preparedFile",prepared.getString("preparedFile")).put("preparedBytes",prepared.getLong("preparedBytes"));
+            else if (prepared != null) row.put("downloadFile",prepared.getString("downloadFile"));
             next.put(row);
             for (int i = 0; i < old.length(); i++) next.put(old.get(i));
             if (!preferences.edit().putString("downloads", next.toString()).commit()) throw new JSONException("下载记录保存未成功");
@@ -247,6 +253,50 @@ final class LibraryStore {
             return result;
         }
     }
+    /** Persist an exact retry target before any irreversible provider/file operation. */
+    void stageDownloadDeletion(long id,String filename) throws Exception {
+        synchronized (LibraryStore.class) {
+            JSONArray rows=read("downloads");JSONObject selected=null;int matches=0;
+            for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&row.optLong("id",-1)==id){selected=row;matches++;}}
+            if(matches!=1)throw new IOException("下载记录不存在或身份重复");
+            selected.put("deleting",true);
+            if(filename!=null)selected.put("deletingFile",filename);
+            commitDownloadDeletion(rows,null);
+        }
+    }
+    boolean deletedDownload(long id) {
+        synchronized (LibraryStore.class) {
+            JSONArray ids=read("deleted_download_ids_v1");String expected=Long.toString(id);
+            for(int i=0;i<ids.length();i++)if(expected.equals(ids.optString(i)))return true;
+            return false;
+        }
+    }
+    void finishDownloadDeletion(long id) throws Exception {
+        synchronized (LibraryStore.class) {
+            JSONArray rows=read("downloads"),next=new JSONArray();int matches=0;
+            for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&row.optLong("id",-1)==id)matches++;else next.put(rows.get(i));}
+            if(matches!=1)throw new IOException("下载记录已变化，请重新读取后重试");
+            JSONArray ids=read("deleted_download_ids_v1"),deleted=new JSONArray().put(Long.toString(id));
+            for(int i=0;i<ids.length()&&deleted.length()<1000;i++)if(!Long.toString(id).equals(ids.optString(i)))deleted.put(ids.get(i));
+            commitDownloadDeletion(next,deleted);
+        }
+    }
+    /** Android updates SharedPreferences memory even when disk commit returns false. */
+    private void commitDownloadDeletion(JSONArray rows,JSONArray deleted) throws IOException {
+        String previous=preferences.getString("downloads",null),previousDeleted=preferences.getString("deleted_download_ids_v1",null);
+        try {
+            SharedPreferences.Editor edit=preferences.edit().putString("downloads",rows.toString());
+            if(deleted!=null)edit.putString("deleted_download_ids_v1",deleted.toString());
+            if(edit.commit())return;
+        }catch(RuntimeException ignored){ }
+        try {
+            SharedPreferences.Editor restore=preferences.edit();
+            if(previous==null)restore.remove("downloads");else restore.putString("downloads",previous);
+            if(previousDeleted==null)restore.remove("deleted_download_ids_v1");else restore.putString("deleted_download_ids_v1",previousDeleted);
+            restore.commit();
+        }catch(RuntimeException ignored){ }
+        throw new IOException("下载删除状态保存未成功，请重试；已删除的视频文件不会恢复");
+    }
     static File preparedFile(Context context,JSONObject row) {
         return preparedFile(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),row);
     }
@@ -259,12 +309,12 @@ final class LibraryStore {
             return ownedPreparedFile(directory,row,row.getString("preparedFile"),bytes);
         }catch(Exception ignored){return null;}
     }
-    private static String preparedPrefix(JSONObject row) throws Exception {
+    static String preparedPrefix(JSONObject row) throws Exception {
         JSONObject series=row.getJSONObject("series"),episode=episode(row.getJSONObject("episode"));
         Object sid=series.opt("seriesId");if(!(sid instanceof String)||!((String)sid).matches("[0-9]{6,30}"))throw new IOException("下载剧集信息无效");
         return sid+"_"+episode.getInt("index")+"_";
     }
-    private static boolean preparedName(JSONObject row,String name) throws Exception {
+    static boolean preparedName(JSONObject row,String name) throws Exception {
         String prefix=preparedPrefix(row);
         return name.startsWith(prefix)&&name.substring(prefix.length()).matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\\.mp4");
     }

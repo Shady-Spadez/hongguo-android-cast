@@ -7,7 +7,7 @@ import android.database.Cursor;
 import java.io.IOException;
 import java.util.List;
 
-/** Bounded, conservative install barrier. Never stops a user's playback, cast or download. */
+/** Exclusive barrier for update hand-off and local download deletion. Never stops playback or casting. */
 final class UpdateInstallCheckpoint {
     private static final UpdateOperationGate GATE = new UpdateOperationGate();
     private static volatile long pendingPlayerUntil;
@@ -18,17 +18,7 @@ final class UpdateInstallCheckpoint {
         GATE.install(owner);
         boolean ready = false;
         try {
-            if (System.nanoTime() < pendingPlayerUntil || PlayerActivity.hasLivePlayer()) throw new IOException("请先返回并结束播放器，再安装更新");
-            ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-            if (manager == null) throw new IOException("业务状态读取未完成，请稍后重试");
-            // API26+ returns this application's services; a running cast service is conservatively busy.
-            List<ActivityManager.RunningServiceInfo> running = manager.getRunningServices(100);
-            if (running == null) throw new IOException("投屏状态读取未完成，请稍后重试");
-            for (ActivityManager.RunningServiceInfo service : running) {
-                String name = service.service == null ? "" : service.service.getClassName();
-                if (name.equals(DlnaCastService.class.getName()) || name.equals(BrowserCastService.class.getName()))
-                    throw new IOException("请先结束投屏及合并任务，再安装更新");
-            }
+            requireNoPlayback(context, "安装更新");
             DownloadManager downloads = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
             if (downloads == null) throw new IOException("下载状态读取未完成，请稍后重试");
             try (Cursor cursor = downloads.query(new DownloadManager.Query().setFilterByStatus(
@@ -40,5 +30,28 @@ final class UpdateInstallCheckpoint {
             OfficialLibrary.checkpointAll(context);
             ready = true;
         } finally { if (!ready) GATE.release(owner); }
+    }
+    /** Active DownloadManager jobs are allowed: deleting one explicitly cancels its job. */
+    static void prepareDownloadDeletion(Context context, Object owner) throws Exception {
+        GATE.install(owner);
+        boolean ready = false;
+        try {
+            requireNoPlayback(context, "删除下载");
+            ready = true;
+        } finally { if (!ready) GATE.release(owner); }
+    }
+    private static void requireNoPlayback(Context context, String action) throws IOException {
+        if (System.nanoTime() < pendingPlayerUntil || PlayerActivity.hasLivePlayer())
+            throw new IOException("请先返回并结束播放器，再" + action);
+        ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        if (manager == null) throw new IOException("业务状态读取未完成，请稍后重试");
+        // API26+ returns this application's services; a running cast service is conservatively busy.
+        List<ActivityManager.RunningServiceInfo> running = manager.getRunningServices(100);
+        if (running == null) throw new IOException("投屏状态读取未完成，请稍后重试");
+        for (ActivityManager.RunningServiceInfo service : running) {
+            String name = service.service == null ? "" : service.service.getClassName();
+            if (name.equals(DlnaCastService.class.getName()) || name.equals(BrowserCastService.class.getName()))
+                throw new IOException("请先结束投屏及合并任务，再" + action);
+        }
     }
 }

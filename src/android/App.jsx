@@ -293,35 +293,129 @@ function Library({ library, error, busy, onRetry, onOpen, onAccount }) {
 
 function Downloads({ notify }) {
   const [state, setState] = useState({ busy: true, items: [] });
-  const [reload, setReload] = useState(0);
   const [opening, setOpening] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [deleting, setDeleting] = useState(null);
+  const [deleteError, setDeleteError] = useState('');
+  const alive = useRef(false);
+  const fetching = useRef(false);
+  const loaded = useRef(false);
+  const queuedRefresh = useRef(false);
+  const readEpoch = useRef(0);
+  const operation = useRef(null);
+  const deletedIds = useRef(new Set());
+  const list = useRef(null);
+  const refreshButton = useRef(null);
+  const cancelButton = useRef(null);
+  const restoreIndex = useRef(null);
+
+  // Keep one list RPC across refreshes/mutations. Invalidating an old read does
+  // not launch a replacement until that read settles, even after deletion.
+  const refresh = useCallback(async function refresh(force = false) {
+    if (!alive.current || document.visibilityState === 'hidden' || operation.current) return;
+    if (fetching.current) { if (force) queuedRefresh.current = true; return; }
+    fetching.current = true;
+    const epoch = ++readEpoch.current;
+    setState(previous => ({ ...previous, busy: true, error: '' }));
+    try {
+      const result = await nativeCall('getDownloads');
+      if (alive.current && epoch === readEpoch.current) {
+        setState({ busy: false, items: (Array.isArray(result) ? result : []).filter(item => !deletedIds.current.has(item.id)) });
+        loaded.current = true;
+      }
+    } catch (error) {
+      if (alive.current && epoch === readEpoch.current) setState(previous => ({ ...previous, busy: false, error: errorText(error) }));
+    } finally {
+      fetching.current = false;
+      if (alive.current && queuedRefresh.current) { queuedRefresh.current = false; refresh(true); }
+    }
+  }, []);
   useEffect(() => {
-    let active = true;
-    let fetching = false;
-    let loaded = false;
-    const refresh = async () => {
-      if (document.visibilityState === 'hidden' || fetching) return;
-      fetching = true;
-      if (active) setState(previous => ({ ...previous, busy: true, error: '' }));
-      try { const result = await nativeCall('getDownloads'); if (active) { setState({ busy: false, items: Array.isArray(result) ? result : [] }); loaded = true; } }
-      catch (error) { if (active) setState((previous) => ({ ...previous, busy: false, error: errorText(error) })); }
-      finally { fetching = false; }
-    };
-    const onVisible = () => { if (document.visibilityState !== 'hidden') refresh(); };
+    alive.current = true;
     refresh();
-    const interval = setInterval(() => { if (loaded) refresh(); }, 2500);
+    const interval = setInterval(() => { if (loaded.current) refresh(); }, 2500);
+    const onVisible = () => { if (document.visibilityState !== 'hidden') refresh(); };
+    const onResume = () => refresh();
     document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('androidresume', refresh);
-    return () => { active = false; clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('androidresume', refresh); };
-  }, [reload]);
-  const open = async (id) => { setOpening(id); try { await nativeCall('playDownload', { id, ...getPlaybackPreferences() }); } catch (error) { notify(errorText(error)); } finally { setOpening(null); } };
+    window.addEventListener('androidresume', onResume);
+    return () => {
+      alive.current = false; readEpoch.current++; queuedRefresh.current = false;
+      clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('androidresume', onResume);
+    };
+  }, [refresh]);
+
+  const cancelConfirmation = useCallback(() => {
+    if (operation.current?.kind !== 'confirm') return;
+    operation.current = null; setConfirm(null); setDeleteError('');
+    refresh(true);
+  }, [refresh]);
+  useEffect(() => {
+    const back = event => {
+      if (!['confirm', 'delete'].includes(operation.current?.kind)) return;
+      event.preventDefault();
+      cancelConfirmation();
+    };
+    window.addEventListener('androiddownloadback', back);
+    return () => window.removeEventListener('androiddownloadback', back);
+  }, [cancelConfirmation]);
+  useEffect(() => {
+    if (confirm) { if (deleting === null) cancelButton.current?.focus(); return; }
+    if (restoreIndex.current === null || opening !== null || deleting !== null) return;
+    const buttons = list.current?.querySelectorAll('.download-delete') || [];
+    const target = buttons[Math.min(restoreIndex.current, buttons.length - 1)] || (!state.busy && refreshButton.current);
+    if (target && !target.disabled) { target.focus(); restoreIndex.current = null; }
+  }, [confirm, deleting, opening, state.items, state.busy]);
+
+  const askDelete = (item, index) => {
+    if (operation.current) return;
+    operation.current = { kind: 'confirm', id: item.id };
+    readEpoch.current++; restoreIndex.current = index;
+    setState(previous => ({ ...previous, busy: false }));
+    setDeleteError(''); setConfirm({ ...item });
+  };
+  const remove = async () => {
+    const selected = operation.current;
+    if (selected?.kind !== 'confirm' || !confirm || selected.id !== confirm.id) return;
+    const id = selected.id;
+    operation.current = { kind: 'delete', id };
+    readEpoch.current++; setDeleting(id); setDeleteError('');
+    try {
+      const result = await nativeCall('deleteDownload', { id, confirmed: true });
+      if (!alive.current) return;
+      if (result?.deleted !== true || result.id !== id) throw new Error('删除结果未确认，请重试。');
+      deletedIds.current.add(id);
+      setState(previous => ({ ...previous, busy: false, items: previous.items.filter(item => item.id !== id) }));
+      setConfirm(null); operation.current = null;
+      refresh(true);
+    } catch (error) {
+      if (alive.current) { operation.current = { kind: 'confirm', id }; setDeleteError(errorText(error)); }
+    } finally {
+      if (alive.current) setDeleting(null);
+    }
+  };
+  const open = async id => {
+    if (operation.current) return;
+    operation.current = { kind: 'open', id }; setOpening(id);
+    try { await nativeCall('playDownload', { id, ...getPlaybackPreferences() }); }
+    catch (error) { if (alive.current) notify(errorText(error)); }
+    finally { if (alive.current) { operation.current = null; setOpening(null); } }
+  };
   const statuses = { pending: '等待下载', running: '正在下载', paused: '已暂停', success: '下载完成', failed: '下载失败' };
+  const activeDownload = item => ['pending', 'running', 'paused'].includes(item.status);
+  const locked = !!confirm || deleting !== null || opening !== null;
   return <>
-    <header className="page-heading heading-actions"><div><h1>下载</h1><p>系统下载任务与设备上的离线视频。</p></div><button className="button" onClick={() => setReload((n) => n + 1)} disabled={state.busy} aria-label="刷新下载列表"><RefreshCw /><span>刷新</span></button></header>
-    <Status busy={state.busy} error={state.error} preserve={!!state.items.length} onRetry={() => setReload((n) => n + 1)} empty={!state.items.length && { title: '还没有下载任务', text: '在短剧详情中选择一集，再点击「下载本集」。' }}>
-      <div className="download-list">{state.items.map((item) => {
+    <header className="page-heading heading-actions"><div><h1>下载</h1><p>系统下载任务与设备上的离线视频。</p></div><button ref={refreshButton} className="button" onClick={() => refresh(true)} disabled={state.busy || locked} aria-label="刷新下载列表"><RefreshCw /><span>刷新</span></button></header>
+    {confirm && <div className="download-confirm" role="group" aria-label="确认删除下载">
+      <h2>{activeDownload(confirm) ? '取消并删除这个下载？' : '删除这个下载？'}</h2>
+      <p>{confirm.title || '短剧'} · 第 {confirm.index} 集</p>
+      <p>{activeDownload(confirm) ? '将取消下载，并删除本机视频文件和下载记录。' : '将删除本机视频文件和下载记录。'}收藏和观看历史会保留。</p>
+      {deleteError && <p className="download-delete-error" role="alert">{deleteError}</p>}
+      <div className="download-confirm-actions"><button ref={cancelButton} type="button" className="button" onClick={cancelConfirmation} disabled={deleting !== null}>取消</button><button type="button" className="button download-destructive" onClick={remove} disabled={deleting !== null}>{deleting !== null ? '删除中…' : '确认删除'}</button></div>
+    </div>}
+    <Status busy={state.busy} error={state.error} preserve={!!state.items.length} onRetry={() => refresh(true)} empty={!state.items.length && { title: '还没有下载任务', text: '在短剧详情中选择一集，再点击「下载本集」。' }}>
+      <div className="download-list" ref={list}>{state.items.map((item, index) => {
         const percent = item.totalBytes > 0 ? Math.min(100, Math.max(0, Math.round(item.downloadedBytes / item.totalBytes * 100))) : null;
-        return <article className="download-row" key={item.id}><div className="download-icon"><Download size={24} /></div><div className="download-info"><h2>{item.title || '短剧'} · 第 {item.index} 集</h2><p className={item.status === 'failed' ? 'text-error' : ''}>{statuses[item.status] || item.status}{percent !== null && item.status !== 'success' ? ` · ${percent}%` : ''} · {byteText(item.downloadedBytes)}{item.totalBytes > 0 ? ` / ${byteText(item.totalBytes)}` : ''}</p>{item.status === 'running' && <progress value={percent ?? undefined} max="100" aria-label={`${item.title}下载进度`} />}{item.reason && item.status !== 'success' ? <p className="download-reason">{item.reason}</p> : null}</div>{item.status === 'success' && <button className="button" onClick={() => open(item.id)} disabled={opening !== null}><Play />{opening === item.id ? '打开中…' : '播放'}</button>}</article>;
+        return <article className="download-row" key={item.id}><div className="download-icon"><Download size={24} /></div><div className="download-info"><h2>{item.title || '短剧'} · 第 {item.index} 集</h2><p className={item.status === 'failed' ? 'text-error' : ''}>{statuses[item.status] || item.status}{percent !== null && item.status !== 'success' ? ` · ${percent}%` : ''} · {byteText(item.downloadedBytes)}{item.totalBytes > 0 ? ` / ${byteText(item.totalBytes)}` : ''}</p>{item.status === 'running' && <progress value={percent ?? undefined} max="100" aria-label={`${item.title}下载进度`} />}{item.reason && item.status !== 'success' ? <p className="download-reason">{item.reason}</p> : null}</div><div className="download-actions">{item.status === 'success' && <button type="button" className="button" onClick={() => open(item.id)} disabled={locked}><Play />{opening === item.id ? '打开中…' : '播放'}</button>}<button type="button" className="button download-delete" aria-label={`${activeDownload(item) ? '取消并删除' : '删除'} ${item.title || '短剧'} 第 ${item.index} 集`} onClick={() => askDelete(item, index)} disabled={locked}>{activeDownload(item) ? '取消并删除' : '删除'}</button></div></article>;
       })}</div>
     </Status>
   </>;
@@ -869,7 +963,7 @@ export default function App() {
   useEffect(() => { if (content.current) content.current.scrollTop = 0; }, [tab]);
   useEffect(() => { if (content.current) content.current.scrollTop = detail ? 0 : previousScroll.current; if (detail) content.current?.querySelector('.back-button')?.focus(); }, [detail?.seed?.seriesId]);
   useEffect(() => {
-    const back = () => { if (detail) { closeDetail(); return true; } if (tab !== 'discover') { setTab('discover'); return true; } return false; };
+    const back = () => { if (!window.dispatchEvent(new CustomEvent('androiddownloadback', { cancelable: true }))) return true; if (detail) { closeDetail(); return true; } if (tab !== 'discover') { setTab('discover'); return true; } return false; };
     window.__androidBack = back;
     const keydown = (event) => { if (event.key !== 'Escape' && event.key !== 'Backspace') return; if (event.target?.matches('input,textarea')) return; if (back()) event.preventDefault(); };
     document.addEventListener('keydown', keydown);

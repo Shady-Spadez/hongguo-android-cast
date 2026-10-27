@@ -2,7 +2,7 @@
 const METHODS = new Set([
   'getInfo', 'httpGet', 'cancelHttp', 'getLibrary', 'getSeriesHistory', 'toggleFavorite', 'play',
   'getAccount', 'officialSendCode', 'officialLoginSMS', 'officialVerifyMFA', 'officialCancelLogin', 'officialLogout', 'officialSync', 'officialImportGuest',
-  'download', 'getDownloads', 'playDownload', 'openExternal',
+  'download', 'getDownloads', 'playDownload', 'deleteDownload', 'openExternal',
   'getPlaybackCache', 'clearPlaybackCache',
   'appRequest', 'appResolveResult', 'getPlaybackOptions', 'setPlaybackOptions',
   'getSearchHistory', 'addSearchHistory', 'removeSearchHistory', 'clearSearchHistory', 'searchQuery',
