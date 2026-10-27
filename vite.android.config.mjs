@@ -22,7 +22,7 @@ export default defineConfig({
   build: {
     outDir: fileURLToPath(new URL('./android/app/src/main/assets/web/', import.meta.url)),
     emptyOutDir: true,
-    target: 'chrome67',
+    target: 'chrome66',
     sourcemap: false,
   },
 });

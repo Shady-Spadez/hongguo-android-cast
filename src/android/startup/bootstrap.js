@@ -56,7 +56,7 @@ import 'core-js/modules/es.string.match-all.js';
   }, true);
   window.addEventListener('unhandledrejection', function () { if (phase === 'loading') failed('script_error'); });
   try {
-    if (typeof BigInt !== 'function' || typeof Promise !== 'function' || typeof Map !== 'function' || typeof Set !== 'function' || typeof Symbol !== 'function' || typeof Symbol.iterator === 'undefined' || !window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+    if (typeof Promise !== 'function' || typeof Map !== 'function' || typeof Set !== 'function' || typeof Symbol !== 'function' || typeof Symbol.iterator === 'undefined' || !window.crypto || typeof window.crypto.getRandomValues !== 'function') {
       failed('unsupported_webview'); return;
     }
     var source = boot && boot.getAttribute('data-app-src');
