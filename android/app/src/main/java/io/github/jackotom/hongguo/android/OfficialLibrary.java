@@ -15,7 +15,7 @@ import org.json.*;
 final class OfficialLibrary {
     interface Api { JSONObject call(String path,String method,JSONObject query,JSONObject body,boolean gzip)throws Exception; }
     interface Persistence { JSONObject read(String uid)throws Exception; void write(String uid,JSONObject value)throws Exception; }
-    interface GuestSource { JSONArray rows()throws Exception; }
+    interface GuestSource { JSONArray rows()throws Exception; default JSONArray favorites()throws Exception{return new JSONArray();} }
     static final class AuthExpiredException extends IOException { AuthExpiredException(String message){super(message);} }
     private static final int MAX_PENDING=2000, MAX_ENTRIES=100_000, MAX_FILE_BYTES=24*1024*1024;
     private static final Set<OfficialLibrary> INSTANCES=Collections.newSetFromMap(new WeakHashMap<OfficialLibrary,Boolean>());
@@ -27,19 +27,22 @@ final class OfficialLibrary {
     private final Map<String,Integer> stateBytes=new HashMap<>();
     private final Map<String,String> errors=new HashMap<>();
     private final Set<String> running=new HashSet<>(),expired=new HashSet<>();
-    private String selected="";
+    private String selected="";private long selectionEpoch;
     private volatile Runnable onDirty;
 
     OfficialLibrary(Context context){
         this(new FilePersistence(new File(context.getApplicationContext().getFilesDir(),"official-library-v1")),
-            ()->new JSONArray(context.getApplicationContext().getSharedPreferences("hongguo_library_v1",Context.MODE_PRIVATE).getString("history","[]")),System::currentTimeMillis);
+            new GuestSource(){
+                public JSONArray rows()throws Exception{return new JSONArray(context.getApplicationContext().getSharedPreferences("hongguo_library_v1",Context.MODE_PRIVATE).getString("history","[]"));}
+                public JSONArray favorites()throws Exception{return new JSONArray(context.getApplicationContext().getSharedPreferences("hongguo_library_v1",Context.MODE_PRIVATE).getString("favorites","[]"));}
+            },System::currentTimeMillis);
     }
     OfficialLibrary(File directory,GuestSource guest,LongSupplier clock){this(new FilePersistence(directory),guest,clock);}
     OfficialLibrary(Persistence disk,GuestSource guest,LongSupplier clock){this.disk=disk;this.guest=guest;this.clock=clock;synchronized(INSTANCES){INSTANCES.add(this);}}
     void setOnDirty(Runnable listener){onDirty=listener;}
     void select(String uid)throws Exception{
         if(uid==null||!uid.isEmpty()&&!validId(uid))throw new IOException("官方账号身份无效");
-        synchronized(lock){selected=uid;if(!uid.isEmpty()){try{state(uid);errors.remove(uid);expired.remove(uid);}catch(Exception error){errors.put(uid,"官方账号本机记录读取未完成");throw error;}}}
+        synchronized(lock){if(!selected.equals(uid))selectionEpoch++;selected=uid;if(!uid.isEmpty()){try{state(uid);errors.remove(uid);expired.remove(uid);}catch(Exception error){errors.put(uid,"官方账号本机记录读取未完成");throw error;}}}
     }
     LibraryStore.HistoryAccess openHistory(){
         final String owner;synchronized(lock){owner=selected;}if(owner.isEmpty())return null;
@@ -87,13 +90,17 @@ final class OfficialLibrary {
     }
     private static JSONObject projectRow(JSONObject row)throws JSONException{
         JSONObject result=new JSONObject();for(String key:new String[]{"seriesId","vid"})result.put(key,row.optString(key,""));result.put("title",clip(row.optString("title",""),200)).put("coverUrl",clip(row.optString("coverUrl",""),4096)).put("description",clip(row.optString("description",""),240)).put("episodeLabel",clip(row.optString("episodeLabel",""),100));
-        for(String key:new String[]{"index","positionMs","updatedAt","favoriteAt","episodeCount","durationMs"})result.put(key,row.optLong(key));result.put("metadataPending",row.optBoolean("metadataPending"));JSONArray tags=row.optJSONArray("tags"),clean=new JSONArray();if(tags!=null)for(int i=0;i<Math.min(4,tags.length());i++)clean.put(clip(tags.optString(i,""),40));return result.put("tags",clean);
+        for(String key:new String[]{"index","positionMs","updatedAt","favoriteAt","episodeCount","durationMs"})result.put(key,row.optLong(key));Object season=row.opt("seasonIndex"),multi=row.opt("multiSeason");if(season instanceof Number){double n=((Number)season).doubleValue();if(Double.isFinite(n)&&n==Math.rint(n)&&n>=0&&n<=10000)result.put("seasonIndex",(int)n);}if(multi instanceof Boolean)result.put("multiSeason",multi);result.put("metadataPending",row.optBoolean("metadataPending"));JSONArray tags=row.optJSONArray("tags"),clean=new JSONArray();if(tags!=null)for(int i=0;i<Math.min(4,tags.length());i++)clean.put(clip(tags.optString(i,""),40));return result.put("tags",clean);
     }
     private JSONArray rowsFor(String uid,boolean favorites)throws JSONException{synchronized(lock){try{return project(state(uid),favorites).rows;}catch(Exception error){remember(uid,error);throw jsonError("官方账号本机记录读取未完成");}}}
     private JSONObject projectionFor(String uid)throws JSONException{synchronized(lock){try{State value=state(uid);Projection history=project(value,false),favorites=project(value,true);return new JSONObject().put("provider","hongguo").put("historyTotal",history.total).put("historyShown",history.rows.length()).put("historyHasMore",history.rows.length()<history.total).put("favoritesTotal",favorites.total).put("favoritesShown",favorites.rows.length()).put("favoritesHasMore",favorites.rows.length()<favorites.total).put("completeSaved",true);}catch(Exception error){throw jsonError("官方账号剧库投影读取未完成");}}}
     private void recordFor(String uid,JSONObject input)throws Exception{
         JSONObject row=localProgress(input);
-        synchronized(lock){State before=state(uid),next=before.copy();String id=row.getString("seriesId");JSONObject old=next.entries.get(id);if(old!=null)row.put("favoriteAt",old.optLong("favoriteAt"));next.entries.put(id,row);next.enqueue("progress",id,true,row);commit(uid,next);}dirty();
+        synchronized(lock){State before=state(uid),next=before.copy();String id=row.getString("seriesId");JSONObject old=next.entries.get(id);if(old!=null){
+                row.put("favoriteAt",old.optLong("favoriteAt"));
+                if(row.optLong("durationMs")==0&&row.optString("vid").equals(old.optString("vid")))row.put("durationMs",old.optLong("durationMs"));
+                if(!input.has("seasonIndex"))row.put("seasonIndex",old.optInt("seasonIndex"));if(!input.has("multiSeason"))row.put("multiSeason",old.optBoolean("multiSeason"));
+            }next.entries.put(id,row);next.enqueue("progress",id,true,row);commit(uid,next);}dirty();
     }
     private void favoriteFor(String uid,JSONObject input)throws Exception{
         JSONObject card=LibraryStore.series(input);String id=card.getString("seriesId");
@@ -101,18 +108,32 @@ final class OfficialLibrary {
     }
     JSONObject importGuest()throws Exception{
         // The caller's explicit confirmation is the only entry into this method; guest storage is never changed.
-        final String owner;synchronized(lock){owner=selected;if(owner.isEmpty())throw new IOException("请先登录红果官方账号");}
-        JSONArray source=guest.rows();Map<String,JSONObject> candidates=new LinkedHashMap<>();int skipped=0;
-        for(int i=0;i<source.length();i++){try{JSONObject row=localProgress(source.getJSONObject(i));String id=row.getString("seriesId");JSONObject old=candidates.get(id);if(old==null||old.getLong("updatedAt")<row.getLong("updatedAt"))candidates.put(id,row);}catch(Exception invalid){skipped++;}}
-        int imported=0,remaining=0;
-        synchronized(lock){if(!selected.equals(owner))throw new InterruptedIOException("账号已切换，请重新确认导入");State next=state(owner).copy();for(Map.Entry<String,JSONObject> candidate:candidates.entrySet()){
+        final String owner;final long ownerEpoch;synchronized(lock){owner=selected;ownerEpoch=selectionEpoch;if(owner.isEmpty())throw new IOException("请先登录红果官方账号");}
+        JSONArray source=guest.rows(),favoriteSource=guest.favorites();if(source==null||favoriteSource==null)throw new IOException("本机游客记录读取未完成");
+        Map<String,JSONObject> candidates=new LinkedHashMap<>(),favoriteCandidates=new LinkedHashMap<>();int historySkipped=0,favoritesSkipped=0;
+        for(int i=0;i<source.length();i++){try{JSONObject row=localProgress(source.getJSONObject(i));String id=row.getString("seriesId");JSONObject old=candidates.get(id);if(old==null||old.getLong("updatedAt")<row.getLong("updatedAt"))candidates.put(id,row);}catch(Exception invalid){historySkipped++;}}
+        for(int i=0;i<favoriteSource.length();i++){try{JSONObject raw=favoriteSource.getJSONObject(i),row=LibraryStore.series(raw);String id=requiredId(row.opt("seriesId"));long stamp=raw.has("favoriteAt")&&!raw.isNull("favoriteAt")?integer(raw.opt("favoriteAt"),0,9_007_199_254_740_991L):1;row.put("favoriteAt",Math.max(1,stamp));JSONObject old=favoriteCandidates.get(id);if(old==null||old.optLong("favoriteAt")<row.optLong("favoriteAt"))favoriteCandidates.put(id,row);}catch(Exception invalid){favoritesSkipped++;}}
+        int historyImported=0,favoritesImported=0,historyRemaining=0,favoritesRemaining=0;boolean watermarksChanged=false;
+        synchronized(lock){if(!selected.equals(owner)||selectionEpoch!=ownerEpoch)throw new InterruptedIOException("账号已切换，请重新确认导入");State next=state(owner).copy();for(Map.Entry<String,JSONObject> candidate:candidates.entrySet()){
                 String id=candidate.getKey();JSONObject row=copy(candidate.getValue()),old=next.entries.get(id);long stamp=row.getLong("updatedAt");
-                if(stamp<=next.imported.getOrDefault(id,0L)||old!=null&&stamp<=old.optLong("updatedAt")){skipped++;continue;}
-                if(!next.pending.containsKey("progress:"+id)&&next.pending.size()>=MAX_PENDING){remaining++;continue;}
-                if(old!=null)row.put("favoriteAt",old.optLong("favoriteAt"));next.entries.put(id,row);next.enqueue("progress",id,true,row);next.imported.put(id,stamp);imported++;
-            }if(imported>0)commit(owner,next);
+                if(stamp<=next.imported.getOrDefault(id,0L)||old!=null&&stamp<=old.optLong("updatedAt")){historySkipped++;continue;}
+                if(!next.pending.containsKey("progress:"+id)&&next.pending.size()>=MAX_PENDING){historyRemaining++;continue;}
+                if(old!=null)row.put("favoriteAt",old.optLong("favoriteAt"));next.entries.put(id,row);next.enqueue("progress",id,true,row);next.imported.put(id,stamp);historyImported++;
+            }
+            for(Map.Entry<String,JSONObject> candidate:favoriteCandidates.entrySet()){
+                String id=candidate.getKey();JSONObject card=candidate.getValue(),old=next.entries.get(id);long stamp=card.getLong("favoriteAt");
+                if(stamp<=next.favoriteImported.getOrDefault(id,0L)){favoritesSkipped++;continue;}
+                // A pending explicit official favorite/cancel takes priority over an older guest membership.
+                // Remember already-present/cancelled imports too, otherwise a later retry could resurrect them.
+                if(next.pending.containsKey("favorite:"+id)||old!=null&&old.optLong("favoriteAt")>0){next.favoriteImported.put(id,stamp);watermarksChanged=true;favoritesSkipped++;continue;}
+                if(next.pending.size()>=MAX_PENDING){favoritesRemaining++;continue;}
+                JSONObject row=old==null?copy(card):copy(old);mergeMetadata(row,card);row.put("favoriteAt",stamp==1?Math.max(1,clock.getAsLong()):stamp);next.entries.put(id,row);next.enqueue("favorite",id,true,row);next.favoriteImported.put(id,stamp);favoritesImported++;
+            }
+            if(historyImported+favoritesImported>0||watermarksChanged)commit(owner,next);
         }
-        if(imported>0)dirty();return new JSONObject().put("importedCount",imported).put("skippedCount",skipped).put("remainingCount",remaining).put("imported",imported).put("remaining",remaining);
+        int imported=historyImported+favoritesImported,skipped=historySkipped+favoritesSkipped,remaining=historyRemaining+favoritesRemaining;
+        if(imported>0)dirty();return new JSONObject().put("importedCount",imported).put("skippedCount",skipped).put("remainingCount",remaining).put("imported",imported).put("remaining",remaining)
+            .put("historyImportedCount",historyImported).put("favoritesImportedCount",favoritesImported).put("historySkippedCount",historySkipped).put("favoritesSkippedCount",favoritesSkipped).put("historyRemainingCount",historyRemaining).put("favoritesRemainingCount",favoritesRemaining);
     }
     void sync(OfficialApiClient client,String uid,BooleanSupplier current)throws Exception{
         JSONObject session=client.session(),cookies=session.optJSONObject("cookies");
@@ -250,16 +271,17 @@ final class OfficialLibrary {
         JSONObject json()throws JSONException{return new JSONObject().put("kind",kind).put("seriesId",id).put("revision",revision).put("value",value).put("row",row);}
     }
     private static final class State {
-        final String uid;final LinkedHashMap<String,JSONObject> entries=new LinkedHashMap<>();final LinkedHashMap<String,Mutation> pending=new LinkedHashMap<>();final LinkedHashMap<String,Long> imported=new LinkedHashMap<>();long sequence,lastSync;
+        final String uid;final LinkedHashMap<String,JSONObject> entries=new LinkedHashMap<>();final LinkedHashMap<String,Mutation> pending=new LinkedHashMap<>();final LinkedHashMap<String,Long> imported=new LinkedHashMap<>(),favoriteImported=new LinkedHashMap<>();long sequence,lastSync;
         State(String uid){this.uid=uid;}
-        State copy(){State s=new State(uid);s.entries.putAll(entries);s.pending.putAll(pending);s.imported.putAll(imported);s.sequence=sequence;s.lastSync=lastSync;return s;}
+        State copy(){State s=new State(uid);s.entries.putAll(entries);s.pending.putAll(pending);s.imported.putAll(imported);s.favoriteImported.putAll(favoriteImported);s.sequence=sequence;s.lastSync=lastSync;return s;}
         void enqueue(String kind,String id,boolean value,JSONObject row)throws Exception{String key=kind+":"+id;if(!pending.containsKey(key)&&pending.size()>=MAX_PENDING)throw new IOException("待同步记录已满，请先完成同步");if(sequence>=9_007_199_254_740_990L)throw new IOException("本机同步序列达到上限");pending.put(key,new Mutation(kind,id,++sequence,value,OfficialLibrary.copy(row)));}
-        JSONObject json()throws Exception{JSONObject rows=new JSONObject(),imports=new JSONObject();for(Map.Entry<String,JSONObject> e:entries.entrySet())rows.put(e.getKey(),e.getValue());for(Map.Entry<String,Long> e:imported.entrySet())imports.put(e.getKey(),e.getValue());JSONArray queue=new JSONArray();for(Mutation m:pending.values())queue.put(m.json());return new JSONObject().put("schema",1).put("ownerUid",uid).put("sequence",sequence).put("lastSyncAt",lastSync).put("entries",rows).put("pending",queue).put("guestImported",imports);}
+        JSONObject json()throws Exception{JSONObject rows=new JSONObject(),imports=new JSONObject(),favoriteImports=new JSONObject();for(Map.Entry<String,JSONObject> e:entries.entrySet())rows.put(e.getKey(),e.getValue());for(Map.Entry<String,Long> e:imported.entrySet())imports.put(e.getKey(),e.getValue());for(Map.Entry<String,Long> e:favoriteImported.entrySet())favoriteImports.put(e.getKey(),e.getValue());JSONArray queue=new JSONArray();for(Mutation m:pending.values())queue.put(m.json());return new JSONObject().put("schema",1).put("ownerUid",uid).put("sequence",sequence).put("lastSyncAt",lastSync).put("entries",rows).put("pending",queue).put("guestImported",imports).put("guestFavoritesImported",favoriteImports);}
         static State parse(JSONObject value,String uid)throws Exception{
             if(integer(value.opt("schema"),1,1)!=1||!uid.equals(value.optString("ownerUid")))throw new IOException("官方本机剧库身份不匹配");State s=new State(uid);s.sequence=integer(value.opt("sequence"),0,9_007_199_254_740_991L);s.lastSync=integer(value.opt("lastSyncAt"),0,9_007_199_254_740_991L);JSONObject rows=value.optJSONObject("entries"),imports=value.optJSONObject("guestImported");JSONArray queue=value.optJSONArray("pending");if(rows==null||imports==null||queue==null||rows.length()>MAX_ENTRIES||queue.length()>MAX_PENDING)throw new IOException("官方本机剧库结构无效");
             for(Iterator<String> it=rows.keys();it.hasNext();){String id=requiredId(it.next());JSONObject row=rows.getJSONObject(id);if(!id.equals(row.optString("seriesId")))throw new IOException("官方本机剧库条目身份不匹配");s.entries.put(id,OfficialLibrary.copy(row));}
             for(int i=0;i<queue.length();i++){JSONObject raw=queue.getJSONObject(i);String kind=raw.getString("kind"),id=requiredId(raw.opt("seriesId"));long revision=integer(raw.opt("revision"),1,s.sequence);if(!kind.equals("favorite")&&!kind.equals("progress"))throw new IOException("官方同步队列类型无效");JSONObject row=raw.getJSONObject("row");if(!id.equals(row.optString("seriesId"))||s.pending.containsKey(kind+":"+id))throw new IOException("官方同步队列身份无效");if(kind.equals("progress"))row=localProgress(row);s.pending.put(kind+":"+id,new Mutation(kind,id,revision,raw.getBoolean("value"),OfficialLibrary.copy(row)));}
-            for(Iterator<String> it=imports.keys();it.hasNext();){String id=requiredId(it.next());s.imported.put(id,integer(imports.opt(id),1,9_007_199_254_740_991L));}return s;
+            JSONObject favoriteImports=value.has("guestFavoritesImported")?value.optJSONObject("guestFavoritesImported"):new JSONObject();if(favoriteImports==null||imports.length()>MAX_ENTRIES||favoriteImports.length()>MAX_ENTRIES)throw new IOException("官方导入记录结构无效");
+            for(Iterator<String> it=imports.keys();it.hasNext();){String id=requiredId(it.next());s.imported.put(id,integer(imports.opt(id),1,9_007_199_254_740_991L));}for(Iterator<String> it=favoriteImports.keys();it.hasNext();){String id=requiredId(it.next());s.favoriteImported.put(id,integer(favoriteImports.opt(id),1,9_007_199_254_740_991L));}return s;
         }
     }
     private static final class FilePersistence implements Persistence {

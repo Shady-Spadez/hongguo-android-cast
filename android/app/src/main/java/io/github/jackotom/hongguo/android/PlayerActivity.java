@@ -103,6 +103,7 @@ public final class PlayerActivity extends Activity {
     private String currentKind = "正在连接片源", lastMediaError;
     private boolean currentManual, currentCache, currentWeb;
     private int lastGoodPosition;
+    private long lastProgressSavedAt;
     private final RecoveryBudget recoveryBudget = new RecoveryBudget();
     static final class RecoveryBudget {
         private int generation; private boolean used;
@@ -362,9 +363,26 @@ public final class PlayerActivity extends Activity {
         autoplayButton.setText(autoplay ? "连播 开" : "连播 关"); autoplayButton.setContentDescription(autoplay ? "自动连播已开启" : "自动连播已关闭");
         updateControlsState();
     }
+    private void recordProgress(JSONObject selectedSeries, JSONObject selectedEpisode, long position) {
+        store.history(selectedSeries, selectedEpisode, position, video == null ? 0 : Math.max(0, video.getDuration()));
+        lastProgressSavedAt = SystemClock.elapsedRealtime();
+    }
     private void saveProgress() {
         if (casting()) return; // The service persists the TV position, never the stopped local VideoView.
-        if (prepared && episode != null) { resumeAt = completed ? 0 : Math.max(0, video.getCurrentPosition()); store.history(owner(episode), episode, resumeAt); }
+        if (prepared && episode != null && video != null) try {
+            resumeAt = completed ? 0 : Math.max(0, video.getCurrentPosition()); recordProgress(owner(episode), episode, resumeAt);
+        } catch (RuntimeException transition) { /* A decoder transition is retried at the next checkpoint. */ }
+    }
+    private void periodicProgress() {
+        if (!active || destroyed || !prepared || casting() || dragging || buffering || qualitySwitch != null || video == null || !video.isPlaying()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (now < lastProgressSavedAt || now - lastProgressSavedAt >= 15000) saveProgress();
+    }
+    private void watchProgressSeeks(MediaPlayer player, int token, VideoView targetView) {
+        player.setOnSeekCompleteListener(mp -> {
+            if (destroyed || token != generation || video != targetView || mediaPlayer != mp || !prepared || casting()) return;
+            saveProgress();
+        });
     }
     private boolean restoreSelection(Bundle state) {
         boolean restored = false;
@@ -525,13 +543,14 @@ public final class PlayerActivity extends Activity {
                             if (!lowerCurrentMedia(token, reason)) playbackError(token, reason); return;
                         }
                         mediaPlayer = player; prepared = true; completed = false;
+                        watchProgressSeeks(player, token, targetView);
                         videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
                         player.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
                         try { actualSpeed = PlayerOptions.setVerifiedSpeed(player, requestedSpeed, false); }
                         catch (Exception error) { actualSpeed = PlayerOptions.observedSpeed(player); Toast.makeText(this, "设备未接受倍速设置，当前速度以播放器确认为准", Toast.LENGTH_LONG).show(); }
                         if (resumeAt > 0 && (video.getDuration() <= 0 || resumeAt < video.getDuration() - 1500)) video.seekTo(resumeAt);
                         if (active && !userPaused) video.start();
-                        store.history(targetSeries, target, resumeAt); renderStatus(); updateButtons();
+                        recordProgress(targetSeries, target, resumeAt); renderStatus(); updateButtons();
                         if (!offline && media.remote != null) cacheEpisode(target, media.remote, playedQuality);
                         if (!offline && autoplay) schedulePrefetch(token);
                     });
@@ -554,7 +573,7 @@ public final class PlayerActivity extends Activity {
         });
         view.setOnCompletionListener(player -> {
             if (destroyed || token != generation || video != view) return;
-            completed = true; resumeAt = 0; store.history(targetSeries, target, 0);
+            completed = true; resumeAt = 0; recordProgress(targetSeries, target, 0);
             if (autoplay && current + 1 < queue.size()) loadAt(current + 1, null, 0);
             else { currentKind = current + 1 == queue.size() ? "本剧已播完" : "本集已播完 · 可点击下一集"; renderStatus(); showControls(); updateButtons(); }
         });
@@ -735,6 +754,7 @@ public final class PlayerActivity extends Activity {
             actualSpeed = accepted; if (Float.isFinite(accepted)) requestedSpeed = accepted; videoWidth = mediaPlayer.getVideoWidth(); videoHeight = mediaPlayer.getVideoHeight();
             bindPlayback(video, generation, episode, job.media.remote, actualQuality);
             final VideoView currentView = video; final int token = generation;
+            watchProgressSeeks(mediaPlayer, token, currentView);
             mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
             currentManual = false; currentCache = job.media.cached; currentWeb = job.media.remote != null;
             currentKind = "清晰度已切换 · " + job.media.kind; renderStatus(); updateButtons(); showControls(); pruneCache();
@@ -808,7 +828,7 @@ public final class PlayerActivity extends Activity {
     private void togglePlayback() {
         if (castCommand("toggle", 0)) return;
         if (!prepared) return;
-        if (video.isPlaying()) { video.pause(); userPaused = true; }
+        if (video.isPlaying()) { video.pause(); userPaused = true; saveProgress(); }
         else { if (completed) { video.seekTo(0); completed = false; } video.start(); userPaused = false; }
         updateButtons();
     }
@@ -864,7 +884,7 @@ public final class PlayerActivity extends Activity {
                 int width = mediaPlayer.getVideoWidth(), height = mediaPlayer.getVideoHeight();
                 if (width != videoWidth || height != videoHeight) { videoWidth = width; videoHeight = height; renderStatus(); }
             }
-            updateButtons();
+            periodicProgress(); updateButtons();
         }
         main.postDelayed(this, 500);
     }};
@@ -959,7 +979,7 @@ public final class PlayerActivity extends Activity {
     }
     private void saveProgressBeforeCast() {
         if (prepared && episode != null) {
-            try { int position = Math.max(0, video.getCurrentPosition()); resumeAt = position; lastGoodPosition = position; store.history(owner(episode), episode, position); }
+            try { int position = Math.max(0, video.getCurrentPosition()); resumeAt = position; lastGoodPosition = position; recordProgress(owner(episode), episode, position); }
             catch (RuntimeException ignored) { }
         }
     }
@@ -1247,7 +1267,7 @@ public final class PlayerActivity extends Activity {
         if (key == KeyEvent.KEYCODE_MEDIA_NEXT) { move(1); return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_PREVIOUS) { move(-1); return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_PLAY) { if (!castCommand("play", 0) && prepared) { userPaused = false; video.start(); updateButtons(); } return true; }
-        if (key == KeyEvent.KEYCODE_MEDIA_PAUSE) { if (!castCommand("pause", 0) && prepared) { userPaused = true; video.pause(); updateButtons(); } return true; }
+        if (key == KeyEvent.KEYCODE_MEDIA_PAUSE) { if (!castCommand("pause", 0) && prepared) { userPaused = true; video.pause(); saveProgress(); updateButtons(); } return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND) { seekBy(key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? 30000 : -10000); return true; }
         if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) { seekBy(key == KeyEvent.KEYCODE_DPAD_LEFT ? -10000 : 10000); return true; }
         if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) { showControls(); toggle.requestFocus(); return true; }

@@ -33,6 +33,7 @@ names=['selectEpisode']
 if modern:
     names+=['releaseCurrent','reserveMedia','releasePrepared','discardPendingMedia','adoptMedia','prepareMedia','stageProgress','loadAt','loadAtInternal','bindPlayback','recoverMedia','lowerCurrentMedia','validSwitch','releaseSwitch','cancelQualitySwitch','failQualitySwitch','selectQuality','switchQuality','resolveQualitySwitch','prepareQualitySwitch','validCandidate','lowerQualitySwitch','finishQualitySwitch','schedulePrefetch','renderStatus','qualityLabel']
 if playlist: names+=['owner','mediaKey','closeLocalWindow','pruneReleasedWindow','saveProgress','restoreSelection','savePlaybackState']
+if 'void recordProgress(' in source: names+=['recordProgress','watchProgressSeeks']
 methods=[]
 for name in names:
     found=blocks(r'^    (?:private|public|protected) (?:synchronized )?(?:static )?[^\n{]*\b'+re.escape(name)+r'\([^;\n]*\)(?: throws [^\n{]+)?\s*\{')
@@ -53,6 +54,7 @@ final class AdaptiveActivityHarness {
  final Label title=new Label(),status=new Label(),time=new Label();final SeekBar seek=new SeekBar();
  JSONObject series,episode,queueSeries,protectedEpisode;String protectedSeriesId="",queueIdentity="";PlaybackCache.QueueWindow localWindow,protectedWindow;boolean cleanup=true;final List<JSONObject>queue=new ArrayList<>();int current,generation=7,resumeAt,lastGoodPosition,qualitySerial,videoWidth,videoHeight;
  boolean destroyed,offline,autoplay,prepared,completed,userPaused,active=true,protectedCurrent,currentManual,currentCache,currentWeb,buffering,castWasActive;
+ long lastProgressSavedAt;
  int loads,loadedAt,loadedPosition,errors,updates,saves,prunes;Uri manualFile;AlertDialog dialog;
  // Danmaku is an independent display boundary, certified by DanmakuControllerTest.
  DanmakuLayer danmaku;static final class DanmakuLayer{void suspend(){}}

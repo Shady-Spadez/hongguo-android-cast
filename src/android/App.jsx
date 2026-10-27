@@ -41,7 +41,14 @@ const sameSeries = (a, b) => String(a?.seriesId) === String(b?.seriesId);
 const timeText = (ms) => { const s = Math.floor((Number(ms) || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const byteText = (bytes) => { const n = Number(bytes) || 0; return n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`; };
 // Do not duplicate an entire episode list inside library entries or bridge payloads.
-const compactSeries = ({ seriesId, title, coverUrl, episodeCount, episodeLabel, tags }) => ({ seriesId, title, coverUrl, episodeCount, episodeLabel, tags });
+const seriesSyncMetadata = value => ({
+  ...(Number.isSafeInteger(value?.seasonIndex) && value.seasonIndex >= 0 && value.seasonIndex <= 10000 ? { seasonIndex: value.seasonIndex } : {}),
+  ...(typeof value?.multiSeason === 'boolean' ? { multiSeason: value.multiSeason } : {}),
+});
+const compactSeries = value => { const { seriesId, title, coverUrl, episodeCount, episodeLabel, tags } = value; return { seriesId, title, coverUrl, episodeCount, episodeLabel, tags, ...seriesSyncMetadata(value) }; };
+const needsSeriesPoint = (library, series) => !!(library.projection?.historyHasMore && !library.history.some(row => sameSeries(row, series)) || library.projection?.favoritesHasMore && !library.favorites.some(row => sameSeries(row, series)));
+const POINT_FAVORITE_ERROR = '当前剧的账号状态暂未读取，请重试详情后再修改追剧。';
+const POINT_RESUME_ERROR = '较早的本机进度暂未读取；可以重试详情或手动选集。';
 const compactEpisode = ({ vid, index, webAvailable, availability }) => ({ vid, index, webAvailable: !!webAvailable, availability: availability || (webAvailable ? 'available' : 'unknown') });
 
 function Status({ busy, error, onRetry, empty, children, preserve = false, errorTitle = '这次没有加载成功', retryLabel = '重新加载' }) {
@@ -556,7 +563,7 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
   const [favoriteBusy, setFavoriteBusy] = useState(false);
   const [favoriteError, setFavoriteError] = useState('');
   const [pointEntry, setPointEntry] = useState(null);
-  const [pointError, setPointError] = useState(false);
+  const [pointError, setPointError] = useState(false), [pointBusy, setPointBusy] = useState(false);
   const favoritePending = useRef(false);
   const [preferences, setPreferences] = useState(getPlaybackPreferences);
   const [mediaOptions, setMediaOptions] = useState({ quality: 'auto', speed: 1 });
@@ -605,15 +612,17 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
   useEffect(() => { const resume = () => { syncReturnedEpisode.current = true; }; window.addEventListener('androidresume', resume); return () => window.removeEventListener('androidresume', resume); }, []);
   useEffect(() => {
     let current = true;
-    setState({ busy: true }); setPointEntry(null); setPointError(false); setFavoriteError('');
-    source.detail(seed.seriesId).then(async (item) => {
+    setState({ busy: true }); setPointEntry(null); setPointError(false); setPointBusy(false); setFavoriteError('');
+    source.detail(seed.seriesId).then(async (resolved) => {
       if (!current || !isSeasonCurrent()) return;
+      let item = { ...resolved, ...seriesSyncMetadata(seed), ...seriesSyncMetadata(resolved) };
       let rememberedRow = libraryRef.current.history.find((entry) => sameSeries(entry, seed));
-      const projection = libraryRef.current.projection;
-      if (projection?.historyHasMore && !rememberedRow || projection?.favoritesHasMore && !libraryRef.current.favorites.some(row => sameSeries(row, seed))) {
+      const favoriteRow = libraryRef.current.favorites.find((entry) => sameSeries(entry, seed));
+      item = { ...item, ...seriesSyncMetadata(favoriteRow), ...seriesSyncMetadata(rememberedRow), ...seriesSyncMetadata(resolved) };
+      if (needsSeriesPoint(libraryRef.current, seed)) {
         const owner = libraryRef.current.owner;
-        try { const result = await nativeCall('getSeriesHistory', { seriesId: seed.seriesId }, 10000); if (!current || owner !== libraryRef.current.owner || result?.owner !== owner) return; const row = result.history; if (row && row.seriesId === seed.seriesId) { setPointEntry({ ...row, __owner: owner }); if (row.index > 0 && typeof row.vid === 'string') rememberedRow = row; } setPointError(false); }
-        catch (_) { if (current) { setPointError(true); setFavoriteError('当前剧的账号状态暂未读取，请重试详情后再修改追剧。'); setResumeError('较早的本机进度暂未读取；可以重试详情或手动选集。'); } }
+        try { const result = await nativeCall('getSeriesHistory', { seriesId: seed.seriesId }, 10000); if (!current || owner !== libraryRef.current.owner) return; if (result?.owner !== owner || result.history && result.history.seriesId !== seed.seriesId) throw new Error('剧集账号状态不匹配'); const row = result.history; if (row) { setPointEntry({ ...row, __owner: owner }); item = { ...item, ...seriesSyncMetadata(row), ...seriesSyncMetadata(resolved) }; if (row.index > 0 && typeof row.vid === 'string') rememberedRow = row; } setPointError(false); }
+        catch (_) { if (current && owner === libraryRef.current.owner) { setPointError(true); setFavoriteError(POINT_FAVORITE_ERROR); setResumeError(POINT_RESUME_ERROR); } }
       }
       if (!current || !isSeasonCurrent()) return;
       setState({ busy: false, item });
@@ -624,6 +633,22 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     }).catch((error) => { if (current) setState({ busy: false, error: errorText(error) }); });
     return () => { current = false; };
   }, [seed.seriesId, initialVid, reload, library.owner]);
+  // A same-owner cloud refresh may change a row omitted from the bounded lists.
+  // Re-read that point without re-fetching source detail or moving the user's selection.
+  useEffect(() => {
+    if (!state.item || typeof library.owner !== 'string') return;
+    const clearPointErrors = () => { setPointError(false); setFavoriteError(value => value === POINT_FAVORITE_ERROR ? '' : value); setResumeError(value => value === POINT_RESUME_ERROR ? '' : value); };
+    if (!needsSeriesPoint(library, seed)) { setPointEntry(null); setPointBusy(false); clearPointErrors(); return; }
+    let current = true;
+    const owner = library.owner; setPointBusy(true);
+    nativeCall('getSeriesHistory', { seriesId: seed.seriesId }, 10000).then(result => {
+      if (!current || owner !== libraryRef.current.owner) return;
+      if (result?.owner !== owner || result.history && result.history.seriesId !== seed.seriesId) throw new Error('剧集账号状态不匹配');
+      setPointEntry(result.history ? { ...result.history, __owner: owner } : null); clearPointErrors();
+    }).catch(() => { if (current && owner === libraryRef.current.owner) { setPointError(true); setFavoriteError(POINT_FAVORITE_ERROR); setResumeError(POINT_RESUME_ERROR); } })
+      .finally(() => { if (current && owner === libraryRef.current.owner) setPointBusy(false); });
+    return () => { current = false; };
+  }, [library]);
   const item = state.item || seed;
   const isFavorite = pointEntry && pointEntry.__owner === library.owner ? pointEntry.favoriteAt > 0 : library.favorites.some((entry) => sameSeries(entry, item));
   const episode = state.item?.episodes?.find((entry) => String(entry.vid) === String(selectedVid));
@@ -637,7 +662,7 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     observer?.observe(node); measure(); window.addEventListener('resize', measure);
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   }, [state.busy, item.description, isTv]);
-  const lastWatchedVid = library.history.find((entry) => sameSeries(entry, item))?.vid;
+  const lastWatchedVid = library.history.find((entry) => sameSeries(entry, item))?.vid || (pointEntry?.__owner === library.owner && pointEntry?.seriesId === item.seriesId ? pointEntry.vid : null);
   const episodes = state.item?.episodes || [];
   const selectedPosition = episodes.findIndex((entry) => String(entry.vid) === String(selectedVid));
   const grouped = !isTv && episodes.length > 30;
@@ -663,7 +688,7 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     return next;
   });
   const favorite = async () => {
-    if (favoritePending.current || pointError) return;
+    if (favoritePending.current || pointError || pointBusy) return;
     const owner = libraryRef.current.owner; favoritePending.current = true;
     setFavoriteBusy(true); setFavoriteError('');
     try { const result = await nativeCall('toggleFavorite', { series: compactSeries(item) }); if (mounted.current && owner === libraryRef.current.owner && (result.owner === undefined || result.owner === owner)) { setPointEntry(null); onLibrary(result); } }
@@ -728,7 +753,7 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     <div className="season-detail-panel" {...seasonPanel}>
     {resumeError && <p className="resume-error" role="alert">{resumeError}</p>}
     <Status busy={state.busy} error={state.error} onRetry={() => setReload((n) => n + 1)}>
-      <section className="detail-summary"><div className="detail-cover">{item.coverUrl ? <img src={item.coverUrl} alt="" /> : <Film size={48} />}</div><div className="detail-copy"><h1>{item.title}</h1><p className="detail-meta">{item.episodeLabel || (item.episodeCount ? `全 ${item.episodeCount} 集` : '剧集详情')}{item.tags?.length ? ` · ${item.tags.join(' / ')}` : ''}</p><p ref={description} id="detail-description" className={`detail-description${!isTv && !descriptionExpanded ? ' description-collapsed' : ''}`}>{item.description || '暂无剧情简介。'}</p>{!isTv && descriptionOverflow && <button className="description-toggle" type="button" aria-expanded={descriptionExpanded} aria-controls="detail-description" onClick={() => setDescriptionExpanded((value) => !value)}>{descriptionExpanded ? '收起简介' : '展开简介'}</button>}<button className={`button ${isFavorite ? 'saved' : ''}`} onClick={favorite} disabled={favoriteBusy || pointError}><Heart />{favoriteBusy ? '保存中…' : isFavorite ? '已加入追剧' : '加入追剧'}</button>{favoriteError && <p className="text-error" role="alert">{favoriteError} {pointError ? <button type="button" className="button" onClick={() => setReload(n => n + 1)}>重试剧集状态</button> : "点击追剧按钮重试。"}</p>}</div></section>
+      <section className="detail-summary"><div className="detail-cover">{item.coverUrl ? <img src={item.coverUrl} alt="" /> : <Film size={48} />}</div><div className="detail-copy"><h1>{item.title}</h1><p className="detail-meta">{item.episodeLabel || (item.episodeCount ? `全 ${item.episodeCount} 集` : '剧集详情')}{item.tags?.length ? ` · ${item.tags.join(' / ')}` : ''}</p><p ref={description} id="detail-description" className={`detail-description${!isTv && !descriptionExpanded ? ' description-collapsed' : ''}`}>{item.description || '暂无剧情简介。'}</p>{!isTv && descriptionOverflow && <button className="description-toggle" type="button" aria-expanded={descriptionExpanded} aria-controls="detail-description" onClick={() => setDescriptionExpanded((value) => !value)}>{descriptionExpanded ? '收起简介' : '展开简介'}</button>}<button className={`button ${isFavorite ? 'saved' : ''}`} onClick={favorite} disabled={favoriteBusy || pointError || pointBusy}><Heart />{favoriteBusy ? '保存中…' : isFavorite ? '已加入追剧' : '加入追剧'}</button>{favoriteError && <p className="text-error" role="alert">{favoriteError} {pointError ? <button type="button" className="button" onClick={() => setReload(n => n + 1)}>重试剧集状态</button> : "点击追剧按钮重试。"}</p>}</div></section>
       <section className="episode-section"><header><h2>选集</h2><p>共 {state.item?.episodes?.length || 0} 集</p></header><p className="episode-note">点击集数直接播放；电视方向键移动、确认键播放。网页 → App 自动取源，逐集点击时核验。</p><div className="episode-browser" hidden={!grouped}><label htmlFor="episode-range">分集范围<select id="episode-range" aria-label="分集范围" value={episodeGroup} onChange={(event) => setEpisodeGroup(Number(event.target.value))}>{Array.from({ length: groupCount }, (_, group) => <option key={group} value={group}>第 {group * 30 + 1}–{Math.min((group + 1) * 30, episodes.length)} 集</option>)}</select></label><button className="button" type="button" disabled={!episode} onClick={locateEpisode}>定位第 {episode?.index || '—'} 集</button></div><div ref={episodeGrid} className="episode-grid" role="group" aria-label="选择剧集">{visibleEpisodes.map((entry) => <button key={`${entry.index}-${entry.vid}`} disabled={operation === 'download' || mediaBusy || playDispatched} title={`播放第 ${entry.index} 集${entry.webAvailable ? '' : '，网页与 App 自动取源'}`} aria-label={`播放第 ${entry.index} 集${entry.webAvailable ? '' : '，自动取源'}`} aria-pressed={String(entry.vid) === String(selectedVid)} onClick={() => playEpisode(entry)}><span>{entry.index}</span>{!entry.webAvailable && <span className="episode-status">自动取源</span>}</button>)}</div>{!state.item?.episodes?.length && <p className="empty-episodes">当前没有剧集。</p>}</section>
       <section className="playback-settings" aria-label="清晰度与倍速">
         <div className="playback-setting"><div><h2>清晰度</h2><p>首选清晰度按真实视频短边像素选源；连续失败后 1080p → 720p → 自动，播放器显示实际档位与分辨率。手动下载严格使用所选清晰度。</p></div><select aria-label="清晰度" value={mediaOptions.quality} disabled={!!operation || mediaBusy} onChange={event => changeMediaOption('quality', event.target.value)}><option value="auto">自动</option><option value="720p">720p 及以上</option><option value="1080p">1080p 及以上</option></select></div>

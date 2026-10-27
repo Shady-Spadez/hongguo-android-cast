@@ -28,7 +28,7 @@ final class OfficialAccountFlow {
     private final AtomicLong generation=new AtomicLong();
     private JSONObject disk,challenge;
     private String phone="",otp="",phase="phone",smsState="",error="";
-    private long retryAt,mfaExpires;
+    private long retryAt,mfaExpires,mfaExpiresNanos;
     private boolean busy,loginRequired;
     private volatile Client active;
     private volatile Thread activeThread;
@@ -113,7 +113,7 @@ final class OfficialAccountFlow {
     private Operation begin(String number,boolean sending)throws Exception {
         synchronized(lock){expireLocked();if(profile()!=null)throw new IOException("请先退出当前红果账号");if(busy)throw new IOException("账号操作处理中，请稍候");if(sending&&clock.now()<retryAt)throw new IOException("请等待倒计时结束后再获取验证码");
             if(!sending&&!phone.isEmpty()&&!phone.equals(number))throw new IOException("手机号已改变，请重新获取验证码");
-            long epoch=generation.incrementAndGet();Client client=clients.create(copy(disk.getJSONObject("session")));active=client;activeThread=Thread.currentThread();busy=true;phone=number;phase=sending?"sending":"submitting";error="";challenge=null;mfaExpires=0;otp="";return new Operation(epoch,client);}
+            long epoch=generation.incrementAndGet();Client client=clients.create(copy(disk.getJSONObject("session")));active=client;activeThread=Thread.currentThread();busy=true;phone=number;phase=sending?"sending":"submitting";error="";challenge=null;mfaExpires=0;mfaExpiresNanos=0;otp="";return new Operation(epoch,client);}
     }
     private void live(Operation op)throws IOException {if(generation.get()!=op.epoch||active!=op.client||Thread.currentThread().isInterrupted())throw new InterruptedIOException("登录已取消");}
     private void saveAnonymous(Operation op)throws Exception {synchronized(lock){live(op);JSONObject next=copy(disk).put("session",op.client.session());store.save(next);live(op);disk=next;}}
@@ -131,26 +131,26 @@ final class OfficialAccountFlow {
     JSONObject loginSMS(String candidate,String code)throws Exception {
         String number=canonicalPhone(candidate);if(code==null||!code.matches("[0-9]{4,8}"))throw new IOException("请输入4至8位短信验证码");Operation op=begin(number,false);notifyChanged();
         try {op.client.registerDevice();saveAnonymous(op);JSONObject response=op.client.smsLogin(number,code,"");live(op);
-            if(success(response))finish(op,response);else if(isMfa(response)){saveAnonymous(op);synchronized(lock){live(op);challenge=copy(response.getJSONObject("data"));otp=code;mfaExpires=clock.now()+600000;phase="mfa";}}
+            if(success(response))finish(op,response);else if(isMfa(response)){saveAnonymous(op);synchronized(lock){live(op);challenge=copy(response.getJSONObject("data"));otp=code;mfaExpires=clock.now()+600000;mfaExpiresNanos=clock.nanos()+java.util.concurrent.TimeUnit.MINUTES.toNanos(10);phase="mfa";}}
             else throw rejected(response);
-        }catch(Exception failure){synchronized(lock){if(generation.get()==op.epoch){error=reason(failure);phase="code";otp="";challenge=null;mfaExpires=0;}}}
+        }catch(Exception failure){synchronized(lock){if(generation.get()==op.epoch){error=reason(failure);phase="code";clearChallenge();}}}
         finally{end(op);}return status();
     }
     JSONObject verifyMfa()throws Exception {
-        final Operation op;final JSONObject selected;final String number,code;final long expires;
+        final Operation op;final JSONObject selected;final String number,code;final long expires,expiresNanos;
         synchronized(lock){expireLocked();if(busy)throw new IOException("账号操作处理中，请稍候");if(challenge==null||otp.isEmpty())throw new IOException("短信验证已结束，请重新登录");
-            long epoch=generation.incrementAndGet();Client client=clients.create(copy(disk.getJSONObject("session")));active=client;activeThread=Thread.currentThread();busy=true;phase="mfa_waiting";error="";selected=copy(challenge);number=phone;code=otp;expires=mfaExpires;op=new Operation(epoch,client);}
+            long epoch=generation.incrementAndGet();Client client=clients.create(copy(disk.getJSONObject("session")));active=client;activeThread=Thread.currentThread();busy=true;phase="mfa_waiting";error="";selected=copy(challenge);number=phone;code=otp;expires=mfaExpires;expiresNanos=mfaExpiresNanos;op=new Operation(epoch,client);}
         notifyChanged();long stop=Math.min(expires,clock.now()+90000);
-        final long stopNanos=clock.nanos()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(0,Math.min(90000,stop-clock.now())));
+        final long stopNanos=Math.min(expiresNanos,clock.nanos()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(0,Math.min(90000,stop-clock.now()))));
         op.client.deadlineNanos(stopNanos);boolean complete=false;
         try {for(int count=0;count<31&&clock.now()<stop&&clock.nanos()<stopNanos;count++){live(op);JSONObject response=op.client.verifyMfa(selected,number);live(op);
                 // A clock correction or late injected/client reply cannot extend the 90-second round.
                 if(clock.nanos()>=stopNanos)break;
                 if("1045".equals(businessCode(response))){long wait=Math.min(3000,Math.min(stop-clock.now(),java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(stopNanos-clock.nanos())));if(wait<=0)break;sleeper.sleep(wait);continue;}
-                if(!success(response))throw mfaFailure(response);JSONObject data=response.getJSONObject("data");String ticket=data.optString("ticket",data.optString("verify_ticket",""));if(ticket.isEmpty())throw new IOException("短信验证没有返回登录票据，请重新登录");
+                if(!success(response))throw mfaFailure(response);JSONObject data=response.getJSONObject("data");String ticket=data.optString("ticket","");if(ticket.isEmpty())ticket=data.optString("verify_ticket","");if(ticket.isEmpty())throw new IOException("短信验证没有返回登录票据，请重新登录");
                 response=op.client.smsLogin(number,code,ticket);live(op);if(clock.nanos()>=stopNanos)break;if(!success(response))throw mfaFailure(response);finish(op,response);complete=true;break;}
-            if(!complete)synchronized(lock){live(op);if(clock.now()>=expires){clearChallenge();phase="phone";error="短信验证等待已过期，请重新获取验证码";}else{phase="mfa";error="本轮短信验证等待已结束，可重试或取消";}}
-        }catch(Exception failure){synchronized(lock){if(generation.get()==op.epoch){error=reason(failure);if(failure instanceof ExpiredMfa||clock.now()>=expires){clearChallenge();phase="phone";}else phase="mfa";}}}
+            if(!complete)synchronized(lock){live(op);if(clock.now()>=expires||clock.nanos()>=expiresNanos){clearChallenge();phase="phone";error="短信验证等待已过期，请重新获取验证码";}else{phase="mfa";error="本轮短信验证等待已结束，可重试或取消";}}
+        }catch(Exception failure){synchronized(lock){if(generation.get()==op.epoch){error=reason(failure);if(failure instanceof ExpiredMfa||clock.now()>=expires||clock.nanos()>=expiresNanos){clearChallenge();phase="phone";}else phase="mfa";}}}
         finally{end(op);}return status();
     }
     private void finish(Operation op,JSONObject response)throws Exception {
@@ -158,8 +158,8 @@ final class OfficialAccountFlow {
         JSONObject next=empty(session).put("profile",new JSONObject().put("uid",uid).put("name",name).put("maskedPhone",mask(phone)));
         synchronized(lock){live(op);store.save(next);live(op);disk=next;clearChallenge();phase="logged_in";error="";loginRequired=false;phone="";smsState="";retryAt=0;}
     }
-    private void clearChallenge(){challenge=null;otp="";mfaExpires=0;}
-    private void expireLocked(){if(challenge!=null&&clock.now()>=mfaExpires){generation.incrementAndGet();Client client=active;if(client!=null)client.close();active=null;Thread thread=activeThread;if(thread!=null&&thread!=Thread.currentThread())thread.interrupt();activeThread=null;busy=false;clearChallenge();phase="phone";error="短信验证等待已过期，请重新获取验证码";}}
+    private void clearChallenge(){challenge=null;otp="";mfaExpires=0;mfaExpiresNanos=0;}
+    private void expireLocked(){if(challenge!=null&&(clock.now()>=mfaExpires||clock.nanos()>=mfaExpiresNanos)){generation.incrementAndGet();Client client=active;if(client!=null)client.close();active=null;Thread thread=activeThread;if(thread!=null&&thread!=Thread.currentThread())thread.interrupt();activeThread=null;busy=false;clearChallenge();phase="phone";error="短信验证等待已过期，请重新获取验证码";}}
     JSONObject suspendLogin()throws JSONException {
         synchronized(lock){expireLocked();if(!busy&&active==null)return status();}
         generation.incrementAndGet();Client client=active;if(client!=null)client.close();Thread thread=activeThread;if(thread!=null&&thread!=Thread.currentThread())thread.interrupt();

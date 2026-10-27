@@ -169,7 +169,7 @@ class CastPlaylistContext extends Context {
 
 /** Explicit synthetic source boundary. It never opens a socket or fetches a real video. */
 final class PlaybackSources {
-    static final List<String> calls=new CopyOnWriteArrayList<>();static volatile String failVid="";
+    static final List<String> calls=new CopyOnWriteArrayList<>();static volatile String failVid="";static volatile byte[] mediaFixture;
     static final class Plan {final String url,source="app";Plan(String sid,String vid){url="https://media.invalid/"+sid+"/"+vid;}}
     static Plan resolve(String sid,String vid,String quality)throws Exception{calls.add(sid+"/"+vid+"/"+quality);if(vid.equals(failVid))throw new IOException("synthetic source unavailable");return new Plan(sid,vid);}
     static Plan recover(String sid,String vid,String quality,boolean fresh)throws Exception{return resolve(sid,vid,quality);}
@@ -177,6 +177,7 @@ final class PlaybackSources {
     static void download(String url,File file,long max)throws Exception{download(url,file,max,"auto");}
     static void download(String url,File file,long max,String quality)throws Exception{
         if(Thread.currentThread().isInterrupted())throw new InterruptedIOException("synthetic cancelled");
+        byte[] fixture=mediaFixture;if(fixture!=null){Files.write(file.toPath(),fixture);return;}
         try(DataOutputStream out=new DataOutputStream(new FileOutputStream(file))){
             out.writeInt(16);out.writeBytes("ftyp");out.writeLong(0);
             out.writeInt(16);out.writeBytes("moov");out.writeLong(0);

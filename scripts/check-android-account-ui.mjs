@@ -67,7 +67,7 @@ function installMock() {
     } else if(m.method==='officialLogout'){
       f.account={...accountBase(),revision:f.account.revision+1};f.nativePhone='';f.library.history=JSON.parse(JSON.stringify(f.guest));result=f.account;
     } else if(m.method==='officialImportGuest'){
-      f.account=fresh({sync:{...f.account.sync,pendingCount:2}});result=f.account;
+      f.account=fresh({sync:{...f.account.sync,pendingCount:3}});result={...f.account,importResult:{importedCount:3,historyImportedCount:2,favoritesImportedCount:1,skippedCount:3,historySkippedCount:2,favoritesSkippedCount:1,remainingCount:4,historyRemainingCount:3,favoritesRemainingCount:1}};
     } else if(m.method==='officialSync'){
       f.account=fresh({sync:{...f.account.sync,syncing:true}});result=f.account;
       setTimeout(()=>{f.account=fresh({sync:{syncing:false,pendingCount:0,lastSyncAt:Date.now(),error:''}});window.__androidAccountChanged?.();},100);
@@ -293,6 +293,23 @@ try {
     await evaluate('window.__seasonFixture.loginMode="success";window.__seasonFixture.loginDelay=1');await login();
     check(await evaluate('!document.querySelector("#official-code")'),'OTP form destroyed on success');
   });
+  await group('UNCERTAIN send accepts a received OTP without another SMS request or false sent claim', async () => {
+    await reset({open:false});await about();await evaluate('window.__seasonFixture.sendMode="uncertain"');
+    await field('official-phone','13800000000');await button('获取短信验证码');
+    await wait('document.querySelector("#official-code")&&!document.querySelector("#official-code").disabled','uncertain delivery exposes received-code entry');
+    check(await evaluate('document.querySelector(".account-status").textContent.includes("尚未确认")&&!document.querySelector(".account-status").textContent.includes("验证码已发送")'),'uncertainty never announced as successful send');
+    await wait('document.activeElement.id==="official-code"','uncertain recovery focuses received-code entry');
+    check(await evaluate('document.querySelector(".account-section").textContent.includes("已收到短信")'),'recovery instruction explains received SMS');
+    check(await evaluate('[...document.querySelectorAll(".account-form button")].some(b=>b.disabled&&b.textContent.includes("秒后可重发"))'),'uncertain request preserves resend cooldown');
+    eq((await accountCalls('officialSendCode')).length,1,'received code entry sends no second SMS');await screenshot('phone-uncertain-received-code.png');
+    await field('official-code','001234');await button('登录红果');await wait('document.querySelector(".account-status").textContent.includes("已登录红果")');
+    eq(await accountCalls('officialLoginSMS'),[{code:'001234'}],'uncertain recovery submits exact code using native phone');
+    eq((await accountCalls('officialSendCode')).length,1,'successful recovery still has only one SMS send');
+    await reset({open:false});await about();await evaluate('var f=window.__seasonFixture;f.nativePhone="13800000000";f.account={...f.account,phase:"phone",smsState:"uncertain",maskedPhone:"138****0000",retryAfter:0,revision:f.account.revision+1};window.__androidAccountChanged()');
+    await wait('document.querySelector("#official-code")','uncertain recovery still available after cooldown');
+    check(await evaluate('[...document.querySelectorAll(".account-section button")].some(b=>b.textContent==="换手机号 / 取消")'),'expired uncertain cooldown still permits changing phone');
+    await button('换手机号 / 取消');await wait('document.querySelector("#official-phone")&&!document.querySelector("#official-code")');eq(await accountCalls('officialSendCode'),[],'changing phone never silently resends SMS');
+  });
   await group('MFA displays upstream SMS instructions, waits for user, survives SMS-app background round trip', async () => {
     await reset({open:false});await about();await sendCode();await evaluate('window.__seasonFixture.loginMode="mfa"');await field('official-code','123456');await button('登录红果');
     await wait('document.querySelector("[aria-label=红果追加短信验证]")');
@@ -317,6 +334,8 @@ try {
     eq(await accountCalls('officialImportGuest'),[],'login does not auto import');
     await button('导入本机记录');await wait('document.querySelector("[aria-label=确认导入本机记录]")');await button('取消');eq(await accountCalls('officialImportGuest'),[],'cancel import writes nothing');
     await button('导入本机记录');await wait('document.querySelector("[aria-label=确认导入本机记录]")');await button('确认导入');await sleep(40);eq((await accountCalls('officialImportGuest')).length,1,'one confirmed import');
+    check(await evaluate('document.querySelector(".account-import-result")?.textContent.includes("收藏 1 条")&&document.querySelector(".account-import-result").textContent.includes("观看记录 2 条")&&document.querySelector(".account-import-result").textContent.includes("4 条")'),'import reports actual favorite/history counts and remaining retryable records');
+    await sleep(1050);check(await evaluate('document.querySelector(".account-import-result")?.textContent.includes("收藏 1 条")'),'status polling does not erase acknowledged import result');await screenshot('phone-guest-import-counts.png');
     await button('立即同步');await wait('document.querySelector(".account-status").textContent.includes("正在同步")');await wait('document.querySelector(".account-status").textContent.includes("最近同步")');
     await button('退出红果账号');await wait('document.querySelector("[aria-label=确认退出红果账号]")');await button('确认退出');await wait('document.querySelector("#official-phone")');
     eq(await evaluate('JSON.stringify(window.__seasonFixture.library.history)'),await evaluate('JSON.stringify(window.__seasonFixture.guest)'),'original guest history not deleted');
@@ -342,6 +361,14 @@ try {
     check(await evaluate('[...document.querySelectorAll(".section-tabs button")].every(e=>e.textContent.includes("(0)"))'),'favorites and history counts both cleared');
     await evaluate('[...document.querySelectorAll(".section-tabs button")].find(e=>e.textContent.includes("追剧")).click()');
     eq(await evaluate('document.querySelectorAll(".poster").length'),0,'old favorites stay cleared after tab switch');
+  });
+  await group('POLL coalesces slow account reads and clears a recovered read error', async () => {
+    await reset({open:false});await about();
+    await evaluate('var f=window.__seasonFixture;f.calls=[];f.accountPlans=[{delay:1400,error:"TEMPORARY_ACCOUNT_READ"}];for(let i=0;i<6;i++)window.__androidResume()');
+    await sleep(1100);eq((await accountCalls('getAccount')).length,1,'only one status RPC remains in flight across events and periodic tick');
+    await wait('document.querySelector(".account-error")?.textContent.includes("TEMPORARY_ACCOUNT_READ")','read failure is explicit');
+    await wait('!document.querySelector(".account-error")','successful retry clears only recovered read error');
+    check(await evaluate('!!document.querySelector("#official-phone")'),'recovery keeps usable login form');
   });
   await group('NO tokens, OTP, phone or old server credential persisted to browser storage', async () => {
     await reset({open:false});await about();await sendCode();await login();

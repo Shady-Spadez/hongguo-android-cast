@@ -6,6 +6,8 @@
 
 0.12.11首次开启安装来源权限后如停在等待状态，返回关于页重新检查更新，再点继续安装；已下载并验证的包会保留。0.12.12修复该返回分支，重新校验APK并保存记录后进入系统安装器。
 
+当前发行0.12.13/code36，包含账号、游客收藏导入与播放进度同步修复；沿用既有更新通道和兼容证书。0.12.12/code35可直接从关于页检查并确认升级，历史Release资产保留不替换。
+
 手机包`io.github.jackotom.hongguo.android`、TV包`io.github.jackotom.hongguo.android.tv`分开，不能互换。更新保留现有安装证书；更换证书会破坏覆盖更新链，不通过卸载清数据处理。
 
 ## 固定渠道
@@ -20,8 +22,8 @@
 ```sh
 bash scripts/build-android.sh --phone-release-compatible
 bash scripts/build-android.sh --tv-release-compatible
-node scripts/generate-android-update.mjs --apk dist/android/Hongguo-0.12.12-phone-release-compatible.apk --device phone --output dist/android/update-phone.json
-node scripts/generate-android-update.mjs --apk dist/android/Hongguo-0.12.12-tv-release-compatible.apk --device tv --output dist/android/update-tv.json
+node scripts/generate-android-update.mjs --apk dist/android/Hongguo-0.12.13-phone-release-compatible.apk --device phone --output dist/android/update-phone.json
+node scripts/generate-android-update.mjs --apk dist/android/Hongguo-0.12.13-tv-release-compatible.apk --device tv --output dist/android/update-tv.json
 ```
 
 版本随实际发布调整，生成器从已签名APK读取字段，拒绝错包、debug包、错签名和非规范文件名，重新打开生成清单确认SHA256。使用SDK Build Tools 35.0.0的aapt与apksigner。不包含上传动作。

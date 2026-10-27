@@ -115,7 +115,8 @@ function installMock() {
   entries[ids[1]].title='官方系列另一个名字';
   const officialItems=()=>[ids[0],ids[1],ids[2]].map((id,index)=>({...compact(entries[id]),seasonLabel:`第${index+1}季`,seasonNumber:index+1,official:true,playable:index!==2,upcoming:index===2,tags:[]}));
   window.AndroidSeries={postMessage(source){const req=JSON.parse(source);f.officialCalls.push(req);if(req.method==='cancel')return;setTimeout(()=>window.__androidSeriesResponse({id:req.id,...(scenario==='official-failed'?{error:'MOCK_OFFICIAL_FAILURE'}:{result:{matching:'official',items:officialItems()}})}),scenario==='official-delayed'?600:25);}};
-  if(scenario==='official-projected-history'){f.pointHistory={...compact(first),...first.episodes[8],positionMs:9000,favoriteAt:1000};f.library.history=[];f.library.favorites=[];f.library.owner='official-fixture';f.library.projection={historyHasMore:true,historyTotal:300,historyShown:0,favoritesHasMore:true,favoritesTotal:300,completeSaved:true};}
+  if(scenario==='official-recent-history'){Object.assign(f.library.history[0],{seasonIndex:3,multiSeason:true});}
+  if(scenario==='official-projected-history'){f.pointHistory={...compact(first),...first.episodes[8],positionMs:9000,favoriteAt:1000,seasonIndex:2,multiSeason:true};f.library.history=[];f.library.favorites=[];f.library.owner='official:'+'a'.repeat(64);f.library.projection={historyHasMore:true,historyTotal:300,historyShown:0,favoritesHasMore:true,favoritesTotal:300,completeSaved:true};}
 }
 fs.mkdirSync(output,{recursive:true});
 const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'hongguo-seasons-ui-'));
@@ -217,6 +218,25 @@ try {
   });
   await group('OFFICIAL bounded library point read restores older episode and old favorite',async()=>{
     await reset({scenario:'official-projected-history'});eq(await selectedEpisode(),9,'point history used despite bounded UI list');check(await evaluate('window.__seasonFixture.pointReads.length>0'),'point RPC made');check(await evaluate('document.querySelector(".detail-copy .saved")?.textContent.includes("已加入追剧")'),'old favorite remains marked');eq((await plays()).length,0,'remembering never auto plays');
+  });
+  await group('OFFICIAL explicit point metadata survives source detail into exact-season playback',async()=>{
+    await reset({scenario:'official-projected-history'});await clickEpisode(9);await wait('window.__seasonFixture.calls.some(c=>c.method==="play")');
+    const params=(await plays())[0];eq(params.series.seasonIndex,2,'explicit cloud seasonIndex reaches native playback');eq(params.series.multiSeason,true,'explicit cloud multiSeason reaches native playback');
+    eq(params.series.seriesId,SID[0],'metadata does not switch series');eq(params.episodes.map(e=>e.vid),await evaluate('window.__seasonFixture.entries[window.__seasonFixture.ids[0]].episodes.map(e=>e.vid)'),'only exact selected season episodes passed');
+    await reset({scenario:'official-recent-history'});await clickEpisode(32);await wait('window.__seasonFixture.calls.some(c=>c.method==="play")');const recent=(await plays())[0];eq(recent.series.seasonIndex,3,'recent library metadata survives neutral source detail');eq(recent.series.multiSeason,true,'recent multi-season flag remains explicit');
+    await reset();await clickEpisode(32);await wait('window.__seasonFixture.calls.some(c=>c.method==="play")');const unknown=(await plays())[0];check(!('seasonIndex' in unknown.series)&&!('multiSeason' in unknown.series),'no season metadata invented from title or directory count');
+  });
+  await group('OFFICIAL same-owner cloud refresh replaces old point favorite without reloading source or moving selection',async()=>{
+    await reset({scenario:'official-projected-history'});eq(await selectedEpisode(),9,'old point selection starts at episode9');
+    const before=await evaluate('({points:window.__seasonFixture.pointReads.length,details:window.__seasonFixture.detailReads.length})');
+    await evaluate('var f=window.__seasonFixture;f.pointHistory={...f.pointHistory,favoriteAt:0,index:12,vid:f.entries[f.ids[0]].episodes[11].vid};window.__androidAccountChanged({owner:f.library.owner})');
+    await wait(`window.__seasonFixture.pointReads.length>${before.points}`,'same-owner snapshot refreshes projected point row');
+    await wait('!document.querySelector(".detail-copy .saved")','cloud favorite removal clears cached old favorite');
+    eq(await selectedEpisode(),9,'cloud refresh does not override explicit selected episode');eq(await evaluate('window.__seasonFixture.detailReads.length'),before.details,'library refresh does not re-fetch media source detail');eq((await plays()).length,0,'cloud update never auto plays');
+    await evaluate('var f=window.__seasonFixture;f.pointHistory={...f.pointHistory,favoriteAt:1000};window.__androidAccountChanged({owner:f.library.owner})');
+    await wait('document.querySelector(".detail-copy .saved")','same-owner point row can re-add favorite');
+    await evaluate('var f=window.__seasonFixture;f.library.projection={historyHasMore:false,favoritesHasMore:false,completeSaved:true};f.library.favorites=[];f.library.history=[];window.__androidAccountChanged({owner:f.library.owner})');
+    await wait('!document.querySelector(".detail-copy .saved")','complete library supersedes cached projected favorite');await screenshot('phone-point-cloud-refresh.png');
   });
   await group('OFFICIAL TV focus activates exact season without auto-playing',async()=>{
     await reset({tv:true});await wait('document.querySelector(".season-note").textContent.includes("官方系列关系")');await evaluate(`document.querySelector(${q(selector(SID[1]))}).focus()`);await key('Enter',13);await ready(SID[1]);eq(await currentId(),SID[1],'TV exact season');eq((await plays()).length,0,'TV season switch is not playback');await noOverflow();await screenshot('tv-official-seasons.png');

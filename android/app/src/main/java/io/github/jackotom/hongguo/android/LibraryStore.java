@@ -49,6 +49,12 @@ final class LibraryStore {
             .put("episodeLabel", text(input, "episodeLabel", 100));
         JSONArray tags = input.optJSONArray("tags"), clean = new JSONArray();
         if (tags != null) for (int i = 0; i < Math.min(8, tags.length()); i++) { String tag = tags.optString(i); if (tag.length() <= 80) clean.put(tag); }
+        if (input.has("seasonIndex")) {
+            Object raw = input.opt("seasonIndex");
+            if (!(raw instanceof Number) || !Double.isFinite(((Number) raw).doubleValue()) || ((Number) raw).doubleValue() != Math.rint(((Number) raw).doubleValue()) || ((Number) raw).doubleValue() < 0 || ((Number) raw).doubleValue() > 10000) throw new JSONException("分季序号无效");
+            result.put("seasonIndex", ((Number) raw).intValue());
+        }
+        if (input.has("multiSeason")) { if (!(input.opt("multiSeason") instanceof Boolean)) throw new JSONException("分季标记无效"); result.put("multiSeason", input.getBoolean("multiSeason")); }
         return result.put("tags", clean);
     }
     static JSONObject episode(JSONObject input) throws JSONException {
@@ -169,18 +175,24 @@ final class LibraryStore {
             if (accountHistory != null && accountHistory.favorites() != null) { accountHistory.toggleFavorite(series); return library(); }
             JSONArray old = read("favorites"), next = new JSONArray(); boolean found = false;
             for (int i = 0; i < old.length(); i++) { JSONObject row = old.optJSONObject(i); if (row == null) continue; if (series.getString("seriesId").equals(row.optString("seriesId"))) found = true; else next.put(row); }
-            if (!found) { if (next.length() >= 200) throw new JSONException("收藏已达 200 部上限"); next.put(series); }
+            if (!found) { if (next.length() >= 200) throw new JSONException("收藏已达 200 部上限"); next.put(new JSONObject(series.toString()).put("favoriteAt", Math.max(1, System.currentTimeMillis()))); }
             preferences.edit().putString("favorites", next.toString()).apply(); return library();
         }
     }
-    void history(JSONObject series, JSONObject episode, long position) {
+    void history(JSONObject series, JSONObject episode, long position) { history(series, episode, position, 0); }
+    void history(JSONObject series, JSONObject episode, long position, long duration) {
         synchronized (LibraryStore.class) {
             try {
                 JSONObject row = new JSONObject(series.toString()).put("vid", episode.getString("vid")).put("index", episode.getInt("index"))
-                    .put("positionMs", Math.max(0, position)).put("updatedAt", System.currentTimeMillis());
+                    .put("positionMs", Math.max(0, position)).put("durationMs", Math.max(0, Math.min(86_400_000L, duration))).put("updatedAt", System.currentTimeMillis());
                 if(accountHistory!=null) { accountHistory.record(row);return; }
                 JSONArray next = new JSONArray().put(row), old = read("history");
-                for (int i = 0; i < old.length() && next.length() < 100; i++) { JSONObject item = old.optJSONObject(i); if (item != null && !series.getString("seriesId").equals(item.optString("seriesId"))) next.put(item); }
+                for (int i = 0; i < old.length(); i++) {
+                    JSONObject item = old.optJSONObject(i); if (item == null) continue;
+                    if (series.getString("seriesId").equals(item.optString("seriesId"))) {
+                        if (row.optLong("durationMs") == 0 && episode.getString("vid").equals(item.optString("vid"))) row.put("durationMs", Math.max(0, Math.min(86_400_000L, item.optLong("durationMs"))));
+                    } else if (next.length() < 100) next.put(item);
+                }
                 preferences.edit().putString("history", next.toString()).apply();
             } catch (JSONException ignored) { }
         }

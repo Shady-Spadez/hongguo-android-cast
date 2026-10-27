@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { accountStatus, accountView, phoneFields, otpFields } from '../src/android/account.mjs';
+import { accountStatus, accountView, phoneFields, otpFields, accountImportSummary } from '../src/android/account.mjs';
 const state = { provider: 'hongguo', authenticated: false, officialLoginAvailable: true, phase: 'phone', revision: 1 };
 
 test('public projection contains only masked official state and excludes native session', () => {
@@ -77,4 +77,13 @@ test('native library and point reads capture owner before and after a fresh stor
     assert.match(body, /before.equals\(AccountSync.get\(\).ownerStamp\(\)\)/);
     assert.match(body, /put\("owner", before\)/);
   }
+});
+
+test('uncertain OTP state and import counts never advertise false send or complete import', () => {
+  assert.match(accountStatus(accountView({ ...state, phase: 'code', smsState: 'uncertain', maskedPhone: '138****0000' })), /尚未确认/);
+  assert.doesNotMatch(accountStatus(accountView({ ...state, phase: 'code', smsState: 'uncertain' })), /验证码已发送/);
+  const text = accountImportSummary({ historyImportedCount: 2, favoritesImportedCount: 1, skippedCount: 3, remainingCount: 4 });
+  assert.match(text, /收藏 1 条/); assert.match(text, /观看记录 2 条/); assert.match(text, /还有 4 条/);
+  assert.doesNotMatch(text, /已处理完毕/);
+  for (const value of [null, {}, { historyImportedCount: -1 }, { historyImportedCount: 1, favoritesImportedCount: 1, skippedCount: NaN, remainingCount: 0 }]) assert.match(accountImportSummary(value), /尚未确认/);
 });

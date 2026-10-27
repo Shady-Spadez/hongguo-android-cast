@@ -4,10 +4,19 @@
 
 ## 安装包
 
-- 手机：`dist/android/Hongguo-0.12.12-phone-release-compatible.apk`
-- 电视 / 盒子：`dist/android/Hongguo-0.12.12-tv-release-compatible.apk`
+- 手机：`dist/android/Hongguo-0.12.13-phone-release-compatible.apk`
+- 电视 / 盒子：`dist/android/Hongguo-0.12.13-tv-release-compatible.apk`
 - 系统：Android 8.0（API 26）或更新版本；使用设备系统 WebView 和原生视频解码器。
-- 两个 flavor 使用不同应用 ID，可以同时安装。手机与 TV 均更新为 `0.12.12`/code35 release-compatible 包（当前桌面源码基线为 `2.3.0`；保留 0.12.5 已移植的上游 2.4 取源兼容修复，不整体升级桌面版）。两者均为真正的 release 构建，`debuggable=false`，不是 debug 包改名；`release-compatible` 使用与各自原 debug 包相同的本机签名证书，应用 ID 不变，便于覆盖安装保留记录。这不是独立生产签名。
+- 两个 flavor 使用不同应用 ID，可以同时安装。手机与 TV 更新为 `0.12.13`/code36 release-compatible 包（当前桌面源码基线为 `2.3.0`；保留 0.12.5 已移植的上游 2.4 取源兼容修复，不整体升级桌面版）。两者均为真正的 release 构建，`debuggable=false`，不是 debug 包改名；`release-compatible` 使用与各自原 debug 包相同的本机签名证书，应用 ID 不变，便于覆盖安装保留记录。这不是独立生产签名。
+
+## 0.12.13 账号与同步复查
+
+- 补齐不确定发码后的验证码输入、空ticket兼容verify_ticket和MFA总挑战的单调时钟期限。
+- 显式游客导入同时覆盖收藏和历史，原子去重、防取消收藏复活，显示剩余可重试数量。
+- 本机播放每15秒、暂停及确认跳转时保存最新进度，传递实际分集时长和已知分季标记；投屏保留接收端分集时长，合并总长不混入单集。
+- 同账号云刷新后重新点查旧剧收藏/进度；账号状态读取单飞，瞬时读取失败恢复后清错误。
+- 部分同步失败仍持久保存有效刷新会话；失效清旧待同步标记，取消/切号不复活旧会话。读库与游客导入新增epoch护栏。
+- 新版使用0.12.13/code36，不替换已公开的0.12.12/code35资产；手机/TV稳定清单按先资产、后清单的顺序更新；0.12.11及后续版本可从关于页检查升级。真实短信与跨设备账号云写仍需用户在设备上主动验收。
 
 ## 0.12.12 官方账号与分季
 

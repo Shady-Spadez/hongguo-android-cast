@@ -2,6 +2,7 @@ package io.github.jackotom.hongguo.android;
 
 import java.io.*;import java.net.*;import java.util.*;import java.util.concurrent.*;import org.json.*;
 /** Deterministic boundary doubles: no Android process, disk media, decoder or network traffic. */
+class SystemClock {static long elapsedRealtime(){return 0;}}
 class Uri {
  final String value;Uri(String s){value=s;}static Uri parse(String s){return new Uri(s);}static Uri fromFile(File f){return new Uri("file:"+f.getPath());}String getScheme(){return value.split(":")[0];}
 }
@@ -64,7 +65,7 @@ class PlayerOptions {
  static float observedSpeed(MediaPlayer p){return p.rate;}static float setVerifiedSpeed(MediaPlayer p,float requested,boolean playing){p.rate=requested;p.playing=playing;return requested;}
  static void update(Object context,JSONObject value)throws Exception{if(failSave)throw new IOException("fixture preference commit failed");saved.add(value.getString("quality"));}
 }
-class LibraryStore {final List<String> histories=new ArrayList<>(),ownedHistories=new ArrayList<>();void history(JSONObject s,JSONObject e,int position){histories.add(e.optString("vid")+":"+position);ownedHistories.add(s.optString("seriesId")+":"+e.optString("vid")+":"+e.optInt("index")+":"+position);}}
+class LibraryStore {final List<String> histories=new ArrayList<>(),ownedHistories=new ArrayList<>();void history(JSONObject s,JSONObject e,int position){history(s,e,position,0);}void history(JSONObject s,JSONObject e,long position,long duration){histories.add(e.optString("vid")+":"+position);ownedHistories.add(s.optString("seriesId")+":"+e.optString("vid")+":"+e.optInt("index")+":"+position);}}
 
 class Bundle {
  final Map<String,Object> values=new HashMap<>();void putString(String k,String v){values.put(k,v);}void putInt(String k,int v){values.put(k,v);}void putBoolean(String k,boolean v){values.put(k,v);}void putDouble(String k,double v){values.put(k,v);}

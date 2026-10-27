@@ -133,14 +133,18 @@ final class NativeBridge {
     private JSONObject currentSeriesHistory(JSONObject params) throws Exception {
         Object raw = params.opt("seriesId");
         if (!(raw instanceof String) || !((String) raw).matches("[0-9]{6,30}")) throw new JSONException("剧集身份无效");
+        AccountSync.Selection selection = AccountSync.get().captureSelection();
         String before = AccountSync.get().ownerStamp();
         JSONObject row = new LibraryStore(activity).seriesHistory((String) raw);
+        AccountSync.get().requireCurrent(selection);
         if (!before.equals(AccountSync.get().ownerStamp())) throw new JSONException("账号已切换，请重新读取本剧进度");
         return new JSONObject().put("owner", before).put("history", row == null ? JSONObject.NULL : row);
     }
     private JSONObject currentLibrary() throws Exception {
+        AccountSync.Selection selection = AccountSync.get().captureSelection();
         String before = AccountSync.get().ownerStamp();
         JSONObject result = new LibraryStore(activity).library();
+        AccountSync.get().requireCurrent(selection);
         if (!before.equals(AccountSync.get().ownerStamp())) throw new JSONException("账号已切换，请重新读取记录");
         return result.put("owner", before);
     }
