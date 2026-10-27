@@ -28,6 +28,20 @@ final class AppUpdater {
     private volatile boolean destroyed, foreground, busy;
     private volatile long epoch;
     private volatile HttpURLConnection connection;
+    private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "hongguo-update-deadlines"); t.setDaemon(true); return t; });
+    private volatile int downloadAttempt, manifestAttempt;
+    private static final java.util.concurrent.atomic.AtomicLong manifestNonces=new java.util.concurrent.atomic.AtomicLong();
+    private String checkSource = "";
+    private int checkRouteIndex, checkRouteCount;
+    private final Object downloadStateLock = new Object();
+    private volatile boolean completingDownload;
+    private String downloadSource = "";
+    private int downloadRouteIndex, downloadRouteCount;
+    private static final class DownloadAttempt {
+        final int serial, route, total; final long deadline; final UpdatePolicy.Source source;
+        volatile boolean expired; volatile HttpURLConnection connection;
+        DownloadAttempt(int serial, long deadline, UpdatePolicy.Source source, int route, int total) { this.serial=serial;this.deadline=deadline;this.source=source;this.route=route;this.total=total; }
+    }
     private Future<?> task;
     private boolean started, pageReady, manualPrompt;
     private int promptedCode;
@@ -77,7 +91,9 @@ final class AppUpdater {
         JSONObject value = new JSONObject().put("state", state).put("message", message).put("busy", busy)
             .put("installedVersion", installedName).put("installedCode", installedCode)
             .put("flavor", BuildConfig.IS_TV ? "tv" : "phone").put("downloaded", downloaded)
-            .put("lastCheckedAt", prefs.getLong("last_checked", 0));
+            .put("lastCheckedAt", prefs.getLong("last_checked", 0))
+            .put("downloadSource", downloadSource).put("downloadRouteIndex", downloadRouteIndex).put("downloadRouteCount", downloadRouteCount)
+            .put("checkSource", checkSource).put("checkRouteIndex", checkRouteIndex).put("checkRouteCount", checkRouteCount);
         if (candidate != null) value.put("versionName", candidate.name).put("versionCode", candidate.code).put("size", candidate.bytes).put("notes", candidate.notes);
         return value;
     }
@@ -130,11 +146,11 @@ final class AppUpdater {
     private void check(boolean manual) {
         if (destroyed || busy || state.equals("installing") || state.equals("unsupported")) return;
         if (!manual) prefs.edit().putLong("last_auto_attempt", System.currentTimeMillis()).apply();
-        busy = true; manualPrompt = manual; state = "checking"; message = "正在检查更新…"; publish();
+        busy = true; manualPrompt = manual; state = "checking"; checkSource="";checkRouteIndex=checkRouteCount=0;message = "正在检查更新…"; publish();
         final long operation = ++epoch;
         submit(operation, () -> {
             try {
-                Candidate latest = Candidate.parse(new JSONObject(new String(fetchManifest(operation), StandardCharsets.UTF_8)), installedCode, installedName);
+                Candidate latest = fetchManifest(operation);
                 finish(operation, () -> {
                     busy = false;
                     prefs.edit().putLong("last_checked", System.currentTimeMillis()).apply();
@@ -152,27 +168,43 @@ final class AppUpdater {
         if (destroyed || busy || candidate == null || !state.equals("available") && !state.equals("error")) return;
         Candidate target = candidate;
         if (target.code <= installedCode) return;
-        dismissPrompt(); busy = true; state = "downloading"; message = "正在下载更新…"; downloaded = 0; publish();
+        dismissPrompt(); busy = true; state = "downloading"; message = "正在选择更新下载线路…"; downloaded = 0; downloadSource = ""; downloadRouteIndex = downloadRouteCount = 0; publish();
         final long operation = ++epoch;
         submit(operation, () -> {
+            boolean moved=false;
             try {
                 if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("更新目录创建失败");
                 if (directory.getUsableSpace() < target.bytes + 8L * 1024 * 1024) throw new IOException("存储空间不足，请先释放空间");
                 partial.delete();
-                transfer(target, operation);
-                finish(operation, () -> { state = "verifying"; message = "正在校验更新包…"; publish(); });
-                verify(target, partial); live(operation);
-                Files.move(partial.toPath(), apk.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                if (!prefs.edit().putString("manifest", target.json.toString()).commit()) { apk.delete(); throw new IOException("更新状态保存失败，请重新下载"); }
-                finish(operation, () -> { busy = false; verifiedCandidate = target; state = "ready"; downloaded = target.bytes; message = "校验通过，确认后安装 " + target.name; publish(); });
-            } catch (Exception error) { partial.delete(); failed(operation, error); }
+                DownloadAttempt completed=transfer(target, operation);
+                synchronized(downloadStateLock) {
+                    liveDownload(operation,completed);
+                    // This short claim closes cancellation before disk promotion; disk I/O stays off the UI lock.
+                    completingDownload=true; ++downloadAttempt;
+                    state="saving"; message="正在保存已验证更新包…";
+                    downloadSource=completed.source.label;downloadRouteIndex=completed.route;downloadRouteCount=completed.total;
+                }
+                finish(operation,this::publish);
+                live(operation);Files.move(partial.toPath(), apk.toPath(), StandardCopyOption.REPLACE_EXISTING);moved=true;live(operation);
+                if (!prefs.edit().putString("manifest", target.json.toString()).commit()) throw new IOException("更新状态保存失败，请重新下载");
+                live(operation);
+                finish(operation, () -> { completingDownload=false; verifiedCandidate = target; state = "ready"; downloaded = target.bytes; message = "校验通过，确认后安装 " + target.name; busy = false; publish(); });
+            } catch (Exception error) {
+                partial.delete();
+                // Before move(), an existing verified archive belongs to the old operation and is left untouched.
+                if(moved) {apk.delete();try{if(target.json.toString().equals(prefs.getString("manifest","")))prefs.edit().remove("manifest").remove("waiting_permission").commit();}catch(RuntimeException ignored){/* Missing archive still prevents an invalid ready restore. */}}
+                completingDownload=false;failed(operation,error);
+            }
         });
     }
     private void cancel() {
-        if (!busy || state.equals("saving")) return;
-        ++epoch; HttpURLConnection active = connection; if (active != null) active.disconnect();
-        if (task != null) task.cancel(true); worker.purge();
-        busy = false; state = stateWasReady() ? "ready" : candidate == null ? "idle" : "available"; downloaded = stateWasReady() ? candidate.bytes : 0; message = "已取消，当前版本继续可用"; publish();
+        HttpURLConnection active;Future<?> canceled;
+        synchronized(downloadStateLock) {
+            if (!busy || state.equals("saving") || completingDownload) return;
+            ++epoch;active=connection;canceled=task;
+            busy = false; state = stateWasReady() ? "ready" : candidate == null ? "idle" : "available"; downloaded = stateWasReady() ? candidate.bytes : 0; message = "已取消，当前版本继续可用";
+        }
+        if(active!=null)active.disconnect();if(canceled!=null)canceled.cancel(true);worker.purge();publish();
     }
     private void install() {
         if (destroyed || busy || candidate == null || !state.equals("ready") || !foreground) return;
@@ -238,60 +270,169 @@ final class AppUpdater {
     }
     private void finish(long operation, Runnable action) { host.runOnUiThread(() -> { if (!destroyed && epoch == operation) action.run(); }); }
     private void live(long operation) throws IOException { if (destroyed || epoch != operation || Thread.currentThread().isInterrupted()) throw new InterruptedIOException("更新操作已取消"); }
+    private void finishManifest(long operation,int attempt,Runnable action){
+        finish(operation,()->{if(manifestAttempt==attempt&&busy&&state.equals("checking"))action.run();});
+    }
+    private void finishDownload(long operation, int attempt, Runnable action) {
+        finish(operation, () -> { if (downloadAttempt == attempt && busy) action.run(); });
+    }
+    private static int remainingTimeout(long deadline, int maximum) throws SocketTimeoutException {
+        long remaining=deadline-SystemClock.elapsedRealtime();
+        if (remaining<=0) throw new SocketTimeoutException();
+        return (int)Math.min(maximum, remaining);
+    }
+    private void disconnect(HttpURLConnection current, DownloadAttempt attempt) {
+        current.disconnect();
+        if (connection == current) connection = null;
+        if (attempt != null && attempt.connection == current) attempt.connection = null;
+    }
+    private void liveDownload(long operation, DownloadAttempt attempt) throws IOException {
+        live(operation);
+        if (attempt.expired || SystemClock.elapsedRealtime() >= attempt.deadline) throw new SocketTimeoutException();
+    }
     private HttpURLConnection open(String address, long operation, long deadline, boolean asset) throws Exception {
+        return open(address, operation, deadline, asset, null);
+    }
+    private HttpURLConnection open(String address, long operation, long deadline, boolean asset, DownloadAttempt attempt) throws Exception {
         for (int hop = 0; hop < 5; hop++) {
             live(operation);
-            if (SystemClock.elapsedRealtime() >= deadline) throw new SocketTimeoutException();
+            if (attempt != null) liveDownload(operation, attempt);
+            remainingTimeout(deadline, 8000);
+            // Every request, including a mirror redirect, stays in its selected route.
+            if ((asset || attempt != null) && !(attempt == null ? UpdatePolicy.allowedRedirect(address) : attempt.source.allows(address)))
+                throw new IOException("更新包跳转地址不受支持");
             URL url = new URL(address); HttpURLConnection current = (HttpURLConnection) url.openConnection(); connection = current;
-            current.setInstanceFollowRedirects(false); current.setConnectTimeout(6000); current.setReadTimeout(8000);
-            current.setRequestProperty("Accept-Encoding", "identity"); current.setRequestProperty("Cache-Control", "no-cache"); current.setRequestProperty("User-Agent", "HongguoAndroid/" + BuildConfig.VERSION_NAME);
-            int status;
-            try { status = current.getResponseCode(); live(operation); }
-            catch (Exception failure) { current.disconnect(); connection = null; throw failure; }
-            if (status >= 300 && status < 400) {
-                String location = current.getHeaderField("Location"); current.disconnect();
-                if (!asset || location == null) throw new IOException("更新清单发生意外跳转");
-                address = url.toURI().resolve(location).toString();
-                if (!UpdatePolicy.allowedRedirect(address)) throw new IOException("更新包跳转地址不受支持");
-                continue;
-            }
-            if (status != 200) { current.disconnect(); throw new IOException(status == 404 ? "当前渠道的更新清单或安装包尚未发布" : "更新服务暂未返回有效内容，请稍后重试"); }
-            return current;
+            if (attempt != null) attempt.connection = current;
+            boolean opened=false;
+            try {
+                current.setInstanceFollowRedirects(false); current.setConnectTimeout(remainingTimeout(deadline,8000)); current.setReadTimeout(remainingTimeout(deadline,15000));
+                current.setRequestProperty("Accept-Encoding", "identity"); current.setRequestProperty("Cache-Control", "no-cache"); current.setRequestProperty("User-Agent", "HongguoAndroid/" + BuildConfig.VERSION_NAME);
+                live(operation); if (attempt != null) liveDownload(operation,attempt);
+                int status=current.getResponseCode(); live(operation);
+                if (attempt != null) liveDownload(operation,attempt); else remainingTimeout(deadline,15000);
+                if (status >= 300 && status < 400) {
+                    String location = current.getHeaderField("Location");
+                    if ((!asset && attempt == null) || location == null) throw new IOException("更新清单发生意外跳转");
+                    address = url.toURI().resolve(location).toString();
+                    if (!(attempt == null ? UpdatePolicy.allowedRedirect(address) : attempt.source.allows(address)))
+                        throw new IOException("更新包跳转地址不受支持");
+                    continue;
+                }
+                if (status != 200) throw new IOException(status == 404 ? "当前渠道的更新清单或安装包尚未发布（HTTP 404）" : "更新服务返回 HTTP " + status + "，请稍后重试");
+                opened=true; return current;
+            } finally { if (!opened) disconnect(current,attempt); }
         }
         throw new IOException("更新包跳转次数过多");
     }
-    private byte[] fetchManifest(long operation) throws Exception {
-        long deadline = SystemClock.elapsedRealtime() + 20000;
-        HttpURLConnection current = open(UpdatePolicy.manifestUrl(BuildConfig.IS_TV), operation, deadline, false);
-        try (InputStream input = current.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[4096]; int n;
-            while ((n = input.read(buffer)) != -1) { live(operation); if (SystemClock.elapsedRealtime() >= deadline) throw new SocketTimeoutException(); if (output.size() + n > 128 * 1024) throw new IOException("更新清单过大"); output.write(buffer, 0, n); }
-            return output.toByteArray();
-        } finally { current.disconnect(); connection = null; }
+    private static long nextManifestNonce(){return manifestNonces.updateAndGet(previous->Math.max(System.currentTimeMillis(),previous+1));}
+    private Candidate fetchManifest(long operation) throws Exception {
+        long deadline=SystemClock.elapsedRealtime()+60000;
+        List<UpdatePolicy.ManifestSource> sources=UpdatePolicy.manifestSources(BuildConfig.IS_TV,nextManifestNonce());
+        Candidate current=null;Exception last=null;int attempted=0;
+        for(int index=0;index<sources.size();index++){
+            live(operation);
+            if(SystemClock.elapsedRealtime()>=deadline){last=new SocketTimeoutException();break;}
+            UpdatePolicy.ManifestSource source=sources.get(index);
+            long routeDeadline=Math.min(deadline,SystemClock.elapsedRealtime()+(index+1==sources.size()?20000:9000));
+            DownloadAttempt attempt=new DownloadAttempt(++manifestAttempt,routeDeadline,source,index+1,sources.size());
+            attempted++;
+            finishManifest(operation,attempt.serial,()->{checkSource=source.label;checkRouteIndex=attempt.route;checkRouteCount=attempt.total;message="正在通过 "+source.label+" 检查更新（线路 "+attempt.route+"/"+attempt.total+"）";publish();});
+            ScheduledFuture<?> timeout=deadlines.schedule(()->{attempt.expired=true;HttpURLConnection active=attempt.connection;if(active!=null)active.disconnect();},Math.max(1,routeDeadline-SystemClock.elapsedRealtime()),TimeUnit.MILLISECONDS);
+            try{
+                Candidate parsed=Candidate.parse(new JSONObject(new String(readManifest(operation,attempt),StandardCharsets.UTF_8)),installedCode,installedName);
+                liveDownload(operation,attempt);
+                if(parsed.code>installedCode)return parsed;
+                current=parsed; // A cached current version must not hide a newer version on another route.
+            }catch(Exception failure){
+                live(operation);
+                if(!attempt.expired&&interruptedDownload(failure)){Thread.currentThread().interrupt();throw new InterruptedIOException("更新操作已取消");}
+                last=failure;
+            }finally{
+                timeout.cancel(false);HttpURLConnection active=attempt.connection;if(active!=null)disconnect(active,attempt);
+            }
+        }
+        live(operation);
+        if(current!=null&&attempted==sources.size())return current;
+        throw new IOException("5 条更新检查线路均未取得有效的新版本信息；"+userError(last==null?new SocketTimeoutException():last),last);
     }
-    private void transfer(Candidate target, long operation) throws Exception {
-        long deadline = SystemClock.elapsedRealtime() + 180000; final long[] lastProgress = {0};
-        HttpURLConnection current = open(target.url, operation, deadline, true);
-        try (InputStream input = current.getInputStream(); FileOutputStream output = new FileOutputStream(partial)) {
-            long declared = current.getContentLengthLong(); if (declared >= 0 && declared != target.bytes) throw new IOException("更新包大小与清单不一致");
-            UpdateIntegrity.copy(input, output, target.bytes, () -> {
-                live(operation); if (SystemClock.elapsedRealtime() >= deadline) throw new SocketTimeoutException();
-            }, count -> {
-                long now = SystemClock.elapsedRealtime();
-                if (now - lastProgress[0] >= 250) { lastProgress[0] = now; finish(operation, () -> { downloaded = count; publish(); }); }
+    private byte[] readManifest(long operation,DownloadAttempt attempt) throws Exception {
+        HttpURLConnection current=open(attempt.source.url,operation,attempt.deadline,false,attempt);
+        try{
+            liveDownload(operation,attempt);
+            try(InputStream input=current.getInputStream();ByteArrayOutputStream output=new ByteArrayOutputStream()){
+                long declared=current.getContentLengthLong();if(declared>128*1024)throw new IOException("更新清单过大");
+                byte[] buffer=new byte[4096];int n;
+                for(;;){liveDownload(operation,attempt);current.setReadTimeout(remainingTimeout(attempt.deadline,15000));n=input.read(buffer);liveDownload(operation,attempt);if(n<0)break;if(output.size()+n>128*1024)throw new IOException("更新清单过大");output.write(buffer,0,n);}
+                return output.toByteArray();
+            }
+        }finally{disconnect(current,attempt);}
+    }
+    private static boolean interruptedDownload(Exception failure) {
+        Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<Throwable,Boolean>());
+        for(Throwable cause=failure;cause!=null&&seen.add(cause);cause=cause.getCause())
+            if(cause instanceof InterruptedException || cause instanceof InterruptedIOException && !(cause instanceof SocketTimeoutException))return true;
+        return Thread.currentThread().isInterrupted();
+    }
+    /** Each source is a fresh complete download and full archive verification, never byte concatenation. */
+    private DownloadAttempt transfer(Candidate target, long operation) throws Exception {
+        long deadline=SystemClock.elapsedRealtime()+240000;
+        List<UpdatePolicy.DownloadSource> sources=UpdatePolicy.downloadSources(target.url);
+        Exception last=null;
+        for(int index=0;index<sources.size();index++) {
+            live(operation); remainingTimeout(deadline,15000);
+            UpdatePolicy.DownloadSource source=sources.get(index);
+            long routeDeadline=index+1==sources.size()?deadline:Math.min(deadline,SystemClock.elapsedRealtime()+45000);
+            DownloadAttempt attempt=new DownloadAttempt(++downloadAttempt,routeDeadline,source,index+1,sources.size());
+            final int route=index+1;
+            finishDownload(operation,attempt.serial,()->{state="downloading";downloaded=0;downloadSource=source.label;downloadRouteIndex=route;downloadRouteCount=sources.size();message="正在通过 "+source.label+" 下载更新（线路 "+route+"/"+sources.size()+"）";publish();});
+            ScheduledFuture<?> timeout=deadlines.schedule(()->{attempt.expired=true;HttpURLConnection active=attempt.connection;if(active!=null)active.disconnect();},Math.max(1,routeDeadline-SystemClock.elapsedRealtime()),TimeUnit.MILLISECONDS);
+            try {
+                if(partial.exists()&&!partial.delete())throw new IOException("更新半成品清理失败，请重启后重试");
+                transferSource(target,operation,attempt);
+                liveDownload(operation,attempt);
+                finishDownload(operation,attempt.serial,()->{state="verifying";message="正在校验更新包（线路 "+route+"/"+sources.size()+" · "+source.label+"）…";publish();});
+                verify(target,partial,()->liveDownload(operation,attempt)); liveDownload(operation,attempt);
+                return attempt;
+            } catch(Exception failure) {
+                if(partial.exists()&&!partial.delete())throw new IOException("更新半成品清理失败，请重启后重试",failure);
+                live(operation);
+                // A route's own watchdog may surface as InterruptedIOException; it is a timeout, not a user cancellation.
+                if(!attempt.expired&&interruptedDownload(failure)) {Thread.currentThread().interrupt();throw new InterruptedIOException("更新操作已取消");}
+                remainingTimeout(deadline,15000); last=failure;
+            } finally {
+                timeout.cancel(false);
+                HttpURLConnection active=attempt.connection;if(active!=null)disconnect(active,attempt);
+            }
+        }
+        throw new IOException("5 条更新下载线路均未完成，请检查网络后重试；"+userError(last),last);
+    }
+    private void transferSource(Candidate target, long operation, DownloadAttempt attempt) throws Exception {
+        final long[] lastProgress={0};
+        HttpURLConnection current=open(attempt.source.url,operation,attempt.deadline,true,attempt);
+        try {
+          liveDownload(operation,attempt);
+          try(InputStream input=current.getInputStream();FileOutputStream output=new FileOutputStream(partial)) {
+            long declared=current.getContentLengthLong();if(declared>=0&&declared!=target.bytes)throw new IOException("更新包大小与清单不一致");
+            UpdateIntegrity.copy(input,output,target.bytes,()->{liveDownload(operation,attempt);current.setReadTimeout(remainingTimeout(attempt.deadline,15000));},count->{
+                long now=SystemClock.elapsedRealtime();
+                if(now-lastProgress[0]>=250){lastProgress[0]=now;finishDownload(operation,attempt.serial,()->{if(state.equals("downloading")&&count>=downloaded){downloaded=count;publish();}});}
             });
-            output.getFD().sync();
-        } finally { current.disconnect(); connection = null; }
+            output.getFD().sync();liveDownload(operation,attempt);
+          }
+        } finally { disconnect(current,attempt); }
     }
     private void verify(Candidate target, File file) throws Exception {
-        if (!file.isFile() || file.length() != target.bytes || !hashFile(file).equals(target.hash)) throw new IOException("更新包完整性校验失败，请重新下载");
+        verify(target,file,()->{if(Thread.currentThread().isInterrupted())throw new InterruptedIOException("校验已取消");});
+    }
+    private void verify(Candidate target, File file, UpdateIntegrity.Guard guard) throws Exception {
+        guard.check();
+        if (!file.isFile() || file.length() != target.bytes || !UpdateIntegrity.hash(file,guard).equals(target.hash)) throw new IOException("更新包完整性校验失败，请重新下载");
+        guard.check();
         PackageManager manager = host.getPackageManager(); int flag = Build.VERSION.SDK_INT >= 28 ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
         PackageInfo installed = manager.getPackageInfo(host.getPackageName(), flag), archive = manager.getPackageArchiveInfo(file.getPath(), flag);
         if (archive == null || !UpdatePolicy.matchingArchive(installed.packageName, installed.versionCode, archive.packageName, archive.versionCode, archive.versionName, target.code, target.name, signerHashes(installed), signerHashes(archive))
                 || archive.applicationInfo == null || archive.applicationInfo.minSdkVersion != target.minSdk || archive.applicationInfo.minSdkVersion > Build.VERSION.SDK_INT) throw new IOException("安装包的应用、版本、系统要求或签名不匹配");
-    }
-    private static String hashFile(File file) throws Exception {
-        return UpdateIntegrity.hash(file, () -> { if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("校验已取消"); });
+        guard.check();
     }
     private static String[] signerHashes(PackageInfo value) throws Exception {
         Signature[] signatures = Build.VERSION.SDK_INT >= 28 && value.signingInfo != null ? value.signingInfo.getApkContentsSigners() : value.signatures;
@@ -299,7 +440,7 @@ final class AppUpdater {
         for (int i = 0; i < signatures.length; i++) result[i] = hex(MessageDigest.getInstance("SHA-256").digest(signatures[i].toByteArray())); return result;
     }
     private static String hex(byte[] data) { StringBuilder out = new StringBuilder(data.length * 2); for (byte b : data) out.append(String.format(Locale.ROOT, "%02x", b & 255)); return out.toString(); }
-    void destroy() { destroyed = true; foreground = false; ++epoch; dismissPrompt(); HttpURLConnection active = connection; if (active != null) active.disconnect(); if (task != null) task.cancel(true); worker.shutdownNow(); UpdateInstallCheckpoint.release(this); }
+    void destroy() { synchronized(downloadStateLock){destroyed = true; foreground = false; ++epoch;} dismissPrompt(); HttpURLConnection active = connection; if (active != null) active.disconnect(); if (task != null) task.cancel(true); worker.shutdownNow(); deadlines.shutdownNow(); UpdateInstallCheckpoint.release(this); }
 
     private static final class Candidate {
         final JSONObject json; final int code, minSdk; final long bytes; final String name, url, hash, notes;

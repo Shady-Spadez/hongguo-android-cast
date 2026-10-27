@@ -44,6 +44,6 @@ export default function UpdatePanel() {
       {canInstall && <button ref={installButton} type="button" className="button primary" disabled={!!busy} onClick={() => perform('install')}>安装更新</button>}
       {busy && ['checking', 'downloading', 'verifying'].includes(value?.state) && <button ref={cancelButton} type="button" className="button" disabled={sending} onClick={() => perform('cancel')}>取消</button>}
     </div>
-    <p className="account-note">每天自动检查一次，不打断播放；下载需确认，安装由系统确认。手机与TV使用各自的更新包。</p>
+    <p className="account-note">每天自动检查一次，不打断播放；下载需确认，安装由系统确认。手机与TV使用各自的更新包。检查和下载自动尝试内置加速线路，失败后回退 GitHub；每条线路都校验完整安装包。</p>
   </section>;
 }

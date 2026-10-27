@@ -33,7 +33,7 @@ test('dedicated bridge and narrow install sharing are wired on both lifecycles',
 });
 test('update panel exposes actions with keyboard-focusable native buttons and honest installation copy', () => {
   const ui=fs.readFileSync('src/android/UpdatePanel.jsx','utf8');
-  assert.match(ui,/aria-live="polite"/); assert.match(ui,/ref=\{installButton\}/);assert.match(ui,/安装由系统确认/);
+  assert.match(ui,/aria-live="polite"/); assert.match(ui,/ref=\{installButton\}/);assert.match(ui,/安装由系统确认/);assert.match(ui,/内置加速线路/);assert.match(ui,/失败后回退 GitHub/);
   for (const method of ['check','download','cancel','install']) assert.ok(ui.includes(`perform('${method}')`));
 });
 test('updater installation owns its gate and its single network lane stays bounded', () => {

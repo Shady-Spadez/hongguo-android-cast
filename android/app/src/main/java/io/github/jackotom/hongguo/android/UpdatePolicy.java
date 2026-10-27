@@ -4,12 +4,16 @@ import java.net.URI;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
 
 /** Android's own release identity. Never consumes the desktop or reference project's feed. */
 final class UpdatePolicy {
     static final String REPOSITORY = "skydeadpeng/hongguo-android-cast";
     static final long CHECK_INTERVAL = 24L * 60 * 60 * 1000;
     static final long MAX_APK_BYTES = 150L * 1024 * 1024;
+    private static final String[] PROXY_HOSTS={"gh-proxy.com","v4.gh-proxy.org","gh-proxy.org","ghfast.top"};
     private static final Set<String> ASSET_HOSTS = new HashSet<>(Arrays.asList("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"));
     static String manifestUrl(boolean tv) { return "https://raw.githubusercontent.com/" + REPOSITORY + "/main/android/update-" + (tv ? "tv" : "phone") + ".json"; }
     static boolean automaticCheckDue(long now, long attempted) { return attempted <= 0 || attempted > now || now - attempted >= CHECK_INTERVAL; }
@@ -43,4 +47,66 @@ final class UpdatePolicy {
         try { URI uri = URI.create(value); return "https".equals(uri.getScheme()) && ASSET_HOSTS.contains(uri.getHost()) && (uri.getPort() == -1 || uri.getPort() == 443) && uri.getRawUserInfo() == null && uri.getRawFragment() == null; }
         catch (RuntimeException invalid) { return false; }
     }
+    /** Transport candidates never replace the canonical manifest / persisted APK identity. */
+    static abstract class Source {
+        final String url,label;
+        Source(String url,String label){this.url=url;this.label=label;}
+        abstract boolean allows(String value);
+    }
+    static final class DownloadSource extends Source {
+        final String proxyHost, canonical;
+        DownloadSource(String url, String label, String proxyHost, String canonical) {
+            super(url,label); this.proxyHost=proxyHost; this.canonical=canonical;
+        }
+        boolean allows(String value) {
+            if (proxyHost == null) return allowedRedirect(value);
+            try {
+                URI uri=URI.create(value), origin=URI.create(canonical);
+                if (!"https".equals(uri.getScheme()) || (uri.getPort()!=-1 && uri.getPort()!=443)
+                        || uri.getRawUserInfo()!=null || uri.getRawFragment()!=null) return false;
+                // A mirror may not redirect to another mirror or change its embedded target.
+                if (proxyHost.equals(uri.getHost())) return uri.getRawQuery()==null
+                    && ("/"+canonical).equals(uri.getRawPath());
+                if ("github.com".equals(uri.getHost())) return uri.getRawQuery()==null
+                    && origin.getRawPath().equals(uri.getRawPath());
+                return allowedRedirect(value);
+            } catch (RuntimeException invalid) { return false; }
+        }
+    }
+    static List<DownloadSource> downloadSources(String canonical) {
+        URI uri;
+        try { uri=URI.create(canonical); } catch (RuntimeException invalid) { throw new IllegalArgumentException("更新包地址无效"); }
+        String pattern="/"+REPOSITORY+"/releases/download/v([0-9]+\\.[0-9]+\\.[0-9]+)/Hongguo-\\1-(phone|tv)-release(?:-compatible)?\\.apk";
+        if (!"https".equals(uri.getScheme()) || !"github.com".equals(uri.getHost()) || uri.getPort()!=-1
+                || uri.getRawUserInfo()!=null || uri.getRawQuery()!=null || uri.getRawFragment()!=null
+                || uri.getRawPath()==null || !uri.getRawPath().matches(pattern))
+            throw new IllegalArgumentException("更新包不是本应用的固定版本发行文件");
+        List<DownloadSource> sources=new ArrayList<>();
+        for (String host:PROXY_HOSTS) sources.add(new DownloadSource("https://"+host+"/"+canonical,host,host,canonical));
+        sources.add(new DownloadSource(canonical,"GitHub 官方直连",null,canonical));
+        return Collections.unmodifiableList(sources);
+    }
+
+    /** Manifest routing is separate from APK/CDN routing and keeps the same one-use cache nonce. */
+    static final class ManifestSource extends Source {
+        final String proxyHost,canonical,query;
+        ManifestSource(String url,String label,String proxyHost,String canonical,String query){super(url,label);this.proxyHost=proxyHost;this.canonical=canonical;this.query=query;}
+        boolean allows(String value){
+            try {
+                URI uri=URI.create(value),origin=URI.create(canonical);
+                if(!"https".equals(uri.getScheme())||(uri.getPort()!=-1&&uri.getPort()!=443)||uri.getRawUserInfo()!=null||uri.getRawFragment()!=null||!query.equals(uri.getRawQuery()))return false;
+                if(proxyHost!=null&&proxyHost.equals(uri.getHost()))return ("/"+canonical).equals(uri.getRawPath());
+                return origin.getHost().equals(uri.getHost())&&origin.getRawPath().equals(uri.getRawPath());
+            }catch(RuntimeException invalid){return false;}
+        }
+    }
+    static List<ManifestSource> manifestSources(boolean tv,long nonce){
+        if(nonce<=0)throw new IllegalArgumentException("更新检查标记无效");
+        String canonical=manifestUrl(tv),query="check="+nonce;
+        List<ManifestSource> sources=new ArrayList<>();
+        for(String host:PROXY_HOSTS)sources.add(new ManifestSource("https://"+host+"/"+canonical+"?"+query,host,host,canonical,query));
+        sources.add(new ManifestSource(canonical+"?"+query,"GitHub 清单直连",null,canonical,query));
+        return Collections.unmodifiableList(sources);
+    }
+
 }
