@@ -3,12 +3,12 @@
   "channel": "android-compatible",
   "flavor": "tv",
   "packageName": "io.github.jackotom.hongguo.android.tv",
-  "versionCode": 39,
-  "versionName": "0.12.16",
+  "versionCode": 40,
+  "versionName": "0.12.17",
   "minSdk": 26,
-  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.16/Hongguo-0.12.16-tv-release-compatible.apk",
-  "size": 512964,
-  "sha256": "71e4bcdab681eebdf42552c86a292d69d609da9c2816c39bff4d7a0123288e59",
-  "notes": "播放失败自动恢复：初次取源和播放中断先自动重新取源一次，仍失败后按真实视频尺寸尝试720p、480p、360p低档，不再回到可能选中高画质的自动档。\n保留同一集的播放位置、暂停和已确认倍速；降档只影响播放会话，不覆盖首选清晰度。增加准备/持续缓冲超时保护，避免旧回调覆盖新一集。\n低档模型与解码尺寸均校验上限，缓存按分辨率边界隔离；手动下载维持严格首选，离线文件不转网络、不删除。下载删除、收藏、观看进度与账号同步保持。\n",
-  "publishedAt": "2026-10-27T01:26:02.734Z"
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.17/Hongguo-0.12.17-tv-release-compatible.apk",
+  "size": 518384,
+  "sha256": "d0444933cbb5fb5ad944c2e4b7f39472be976b46526cc0e5ffc9ff28c0540bad",
+  "notes": "更新检查与下载新增四条内置 GitHub 加速线路，按顺序尝试，失败后回退 GitHub 原始地址；显示当前线路和切换进度。\n每条线路重新完整下载，并校验准确大小、SHA256、包名、版本、SDK和安装签名；取消、超时及旧请求不会继续取得安装资格。清单原始发行地址保持不变。\n旧版更新器尚无代理路由：如旧版下载失败，请先从加速链接覆盖安装本版一次，以后应用内更新将自动切换线路。下载、账号、收藏、观看进度和播放自动恢复保持。\n检查清单同样自动换线并带缓存戳，拒绝陈旧或错误清单，避免仅 APK 加速但仍被清单直连阻断。\n",
+  "publishedAt": "2026-10-27T02:32:51.137Z"
 }
