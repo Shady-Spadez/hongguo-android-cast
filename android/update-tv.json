@@ -3,12 +3,12 @@
   "channel": "android-compatible",
   "flavor": "tv",
   "packageName": "io.github.jackotom.hongguo.android.tv",
-  "versionCode": 36,
-  "versionName": "0.12.13",
+  "versionCode": 37,
+  "versionName": "0.12.14",
   "minSdk": 26,
-  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.13/Hongguo-0.12.13-tv-release-compatible.apk",
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.14/Hongguo-0.12.14-tv-release-compatible.apk",
   "size": 502460,
-  "sha256": "5550b9785f9b1a4e8f22cc5c4cf030615ebc353ee6520f69be9e5d416798cd2e",
-  "notes": "完善红果账号与同步：发码结果不确定时可输入已收到的验证码；修复MFA票据与期限；游客收藏和历史同时导入；播放中定时保存进度并同步真实时长；修复旧剧收藏刷新、会话刷新丢失和同步状态卡住，增强切号隔离。\n",
-  "publishedAt": "2026-10-26T23:45:58.247Z"
+  "sha256": "9bd63577728bafbd1fe0c31c11092b987efdcf0ba1e2e1db0de1f6daa36a066e",
+  "notes": "修复升级后首次打开版本页误显示“更新包已验证，可继续安装”：仅完整验证成功才恢复可安装状态，清理同版已安装及无效缓存；保留合法新版缓存、授权返回续装和记录落盘。账号、收藏、观看进度功能保持。\n",
+  "publishedAt": "2026-10-27T00:19:41.658Z"
 }
