@@ -43,7 +43,7 @@
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
-    "@babel/plugin-transform-bigint": "^7.25.2",
+    "babel-plugin-transform-bigint": "^1.0.34",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^8.2.2",
     "electron": "44.9.1",

@@ -1,6 +1,6 @@
 import { build } from 'esbuild';
 import { transformSync } from '@babel/core';
-import bigintPlugin from '@babel/plugin-transform-bigint';
+import bigintPlugin from 'babel-plugin-transform-bigint';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './build-android-startup.mjs';
