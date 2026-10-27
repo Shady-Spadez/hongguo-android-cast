@@ -21,13 +21,17 @@ final class NativeBridge {
     // Page races have their own bounded lane and never queue behind media preparation.
     private final ThreadPoolExecutor httpWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8));
     private final ConcurrentHashMap<String, FutureTask<Void>> httpRequests = new ConcurrentHashMap<>();
+    // Registered playback metadata never queues behind a media download or login.
+    private final ThreadPoolExecutor modelWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
+    private final ConcurrentHashMap<String, RegisteredPlaybackModel> modelCalls = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, FutureTask<Void>> modelTasks = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor downloadWorker = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(4));
     // Slow search/registration must not occupy playback's request workers.
     // No queued searches: reject overload promptly rather than exceed the JS deadline.
     private final ThreadPoolExecutor searchWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
     // Login/cloud control never occupies source or media request workers.
     private final ThreadPoolExecutor accountWorker = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
-    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest"));
+    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest"));
     NativeBridge(MainActivity activity) { this.activity = activity; store = new LibraryStore(activity); downloads = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE); }
     @JavascriptInterface public void postMessage(String message) {
         if (message == null || message.length() > 256 * 1024 || message.getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return;
@@ -45,7 +49,7 @@ final class NativeBridge {
             // Control callbacks never enter a network queue; only registered page IDs are cancellable.
             if (method.equals("cancelHttp")) {
                 Object requestId = params.opt("requestId");
-                boolean cancelled = requestId instanceof String && cancelHttp((String) requestId);
+                boolean cancelled = requestId instanceof String && (cancelHttp((String) requestId) | cancelRegisteredModel((String) requestId));
                 try { respond(id, new JSONObject().put("cancelled", cancelled), null); } catch (JSONException ignored) { }
                 return;
             }
@@ -55,6 +59,7 @@ final class NativeBridge {
                 return;
             }
             if (method.equals("httpGet")) { startHttp(id, params); return; }
+            if (method.equals("appRegisteredModel")) { startRegisteredModel(id, params); return; }
             // Completion callbacks must not wait behind HTTP or full-media preparation.
             if (method.equals("appResolveResult")) {
                 try { handle(id, method, params); } catch (Exception error) { respond(id, null, "分集结果不匹配"); }
@@ -73,6 +78,48 @@ final class NativeBridge {
             try { executor.execute(() -> { try (AutoCloseable updateLease = (method.equals("download") || method.equals("playDownload")) ? UpdateInstallCheckpoint.operation() : null) { handle(id, method, params, favoriteStore, favoriteSelection); } catch (Exception error) { respond(id, null, error.getMessage() == null ? "操作未成功，请重试" : error.getMessage()); } }); }
             catch (RejectedExecutionException error) { respond(id, null, "请求较多，请稍后重试"); }
         });
+    }
+    private void startRegisteredModel(Object id, JSONObject params) {
+        final String key = String.valueOf(id), vid;
+        try { vid = RegisteredPlaybackModel.requestedVid(params); }
+        catch (Exception invalid) { respondHttpError(id, "分集请求信息无效", "INVALID_INPUT"); return; }
+        if (closed) return;
+        final RegisteredPlaybackModel operation = new RegisteredPlaybackModel();
+        if (modelCalls.putIfAbsent(key, operation) != null) { operation.close(); respondHttpError(id, "片源请求编号重复", "INVALID_INPUT"); return; }
+        FutureTask<Void> task = new FutureTask<Void>(() -> {
+            JSONObject result = null; String error = null, code = null;
+            try { result = operation.fetch(vid); }
+            catch (Exception failure) {
+                code = failure instanceof java.net.SocketTimeoutException ? "ETIMEDOUT" : failure instanceof java.io.InterruptedIOException ? "ERR_CANCELED" : failure instanceof RegisteredPlaybackModel.ModelError ? ((RegisteredPlaybackModel.ModelError) failure).code : "APP_INVALID_RESPONSE";
+                error = code.equals("ETIMEDOUT") ? "App片源登记和取源超时，请重试" : code.equals("ERR_CANCELED") ? "App片源请求已取消" : failure instanceof RegisteredPlaybackModel.ModelError ? failure.getMessage() : "App片源登记或取源未完成，请重试";
+            }
+            final JSONObject ready = result; final String message = error, errorCode = code;
+            activity.runOnUiThread(() -> {
+                try {
+                    if (!closed && operation.current() && modelCalls.get(key) == operation) {
+                        JSONObject response = new JSONObject().put("id", id).put("result", ready == null ? JSONObject.NULL : ready).put("error", message == null ? JSONObject.NULL : message);
+                        if (errorCode != null) response.put("errorCode", errorCode);
+                        activity.script("window.__androidResponse && window.__androidResponse(" + response.toString() + ")");
+                    }
+                } catch (JSONException ignored) { }
+                finally { modelCalls.remove(key, operation); operation.close(); }
+            });
+            return null;
+        }) { @Override protected void done() { modelTasks.remove(key, this); } };
+        modelTasks.put(key, task);
+        if (closed || modelCalls.get(key) != operation) { cancelRegisteredModel(key); return; }
+        try { modelWorker.execute(task); }
+        catch (RejectedExecutionException busy) { modelTasks.remove(key, task); modelCalls.remove(key, operation); operation.close(); task.cancel(true); respondHttpError(id, "片源请求较多，请稍后重试", "ETIMEDOUT"); }
+    }
+    private boolean cancelRegisteredModel(String id) {
+        RegisteredPlaybackModel operation = modelCalls.remove(id); FutureTask<Void> task = modelTasks.remove(id);
+        if (operation != null) operation.close(); if (task != null) task.cancel(true);
+        return operation != null || task != null;
+    }
+    private void closeRegisteredModels() {
+        for (String id : new ArrayList<>(modelCalls.keySet())) cancelRegisteredModel(id);
+        for (FutureTask<Void> task : modelTasks.values()) task.cancel(true);
+        modelCalls.clear(); modelTasks.clear(); modelWorker.shutdownNow();
     }
     private static long httpInteger(JSONObject params, String key, long fallback) throws Exception {
         if (!params.has(key)) return fallback;
@@ -415,5 +462,5 @@ final class NativeBridge {
             activity.runOnUiThread(() -> { if (!closed) activity.script(source); });
         } catch (JSONException ignored) { }
     }
-    void close() { closed = true; closeHttp(); worker.shutdownNow(); downloadWorker.shutdownNow(); searchWorker.shutdownNow(); accountWorker.shutdownNow(); try { AccountSync.get().cancelLogin(); } catch (Exception ignored) { } }
+    void close() { closed = true; closeRegisteredModels(); closeHttp(); worker.shutdownNow(); downloadWorker.shutdownNow(); searchWorker.shutdownNow(); accountWorker.shutdownNow(); try { AccountSync.get().cancelLogin(); } catch (Exception ignored) { } }
 }

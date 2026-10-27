@@ -16,6 +16,22 @@ public final class PlaybackResolutionSourceTest {
   try{resolve=PlaybackSources.class.getDeclaredMethod("resolvePlayback",String.class,String.class,String.class,int.class,boolean.class,boolean.class);classify=PlaybackSources.class.getDeclaredMethod("canRecoverPlayback",Exception.class);}catch(NoSuchMethodException absent){System.out.println("FAIL missing actual bounded fresh playback source API / resolution ceiling");System.exit(1);return;}
   PlaybackSources.attach(host);
   try{
+   group("timed-out native waiter aborts only its matching registered model job",()->{
+    List<String> scripts=new ArrayList<>();host.callback=scripts::add;Method attempt=PlaybackSources.class.getDeclaredMethod("resolveAppAttempt",String.class,String.class,String.class,long.class,int.class);attempt.setAccessible(true);
+    Exception failure=reject(()->{try{attempt.invoke(null,SID,VID,"auto",25L,0);}catch(InvocationTargetException e){throw(Exception)e.getCause();}});
+    check(failure.getMessage().contains("超时"),"actual future timeout is preserved");
+    check(scripts.size()==2&&scripts.get(1).contains("__androidAppCancelResolve"),"native waiter cancels matching JavaScript model job");
+    check(args(scripts.get(0)).getString(0).equals(args(scripts.get(1)).getString(0)),"cancel uses original opaque operation ID");
+    Field requests=PlaybackSources.class.getDeclaredField("pending");requests.setAccessible(true);check(((Map<?,?>)requests.get(null)).isEmpty(),"timed out pending request removed");
+   });
+   group("interrupted native waiter cancels registered job without a later reply",()->{
+    List<String>scripts=Collections.synchronizedList(new ArrayList<>());java.util.concurrent.CountDownLatch started=new java.util.concurrent.CountDownLatch(1);java.util.concurrent.atomic.AtomicReference<Throwable>failure=new java.util.concurrent.atomic.AtomicReference<>();java.util.concurrent.atomic.AtomicBoolean interrupted=new java.util.concurrent.atomic.AtomicBoolean();
+    host.callback=script->{scripts.add(script);if(script.contains("__androidAppResolve("))started.countDown();};Method attempt=PlaybackSources.class.getDeclaredMethod("resolveAppAttempt",String.class,String.class,String.class,long.class,int.class);attempt.setAccessible(true);
+    Thread thread=new Thread(()->{try{attempt.invoke(null,SID,VID,"auto",1000L,0);}catch(Throwable e){failure.set(e instanceof InvocationTargetException?e.getCause():e);interrupted.set(Thread.currentThread().isInterrupted());}});thread.start();check(started.await(1,java.util.concurrent.TimeUnit.SECONDS),"request started");thread.interrupt();thread.join(1000);
+    check(!thread.isAlive()&&failure.get() instanceof InterruptedException&&interrupted.get(),"interruption retained and waiter stopped");
+    check(scripts.size()==2&&scripts.get(1).contains("__androidAppCancelResolve"),"interrupted waiter stops JavaScript and native operation");
+    check(args(scripts.get(0)).getString(0).equals(args(scripts.get(1)).getString(0)),"interruption never cancels a new selection");
+   });
    group("fresh same URL performs distinct opaque requests and retains measured cap",()->{List<JSONArray>calls=new ArrayList<>();callback(a->{calls.add(a);success(a,720);});PlaybackSources.Plan a=lookup("720p",1079,true),b=lookup("720p",1079,true);check(calls.size()==2&&!calls.get(0).getString(0).equals(calls.get(1).getString(0)),"new opaque lookup even same URL");check(a.width==720&&b.width==720&&a.json().getInt("playbackCeiling")==1079,"real Plan stores measured cap");});
    group("all fallback stages and cache namespaces remain separate",()->{for(String q:new String[]{"480p","360p"}){int n=Integer.parseInt(q.substring(0,q.length()-1));callback(a->success(a,n));PlaybackSources.Plan p=PlaybackSources.resolve(SID,VID,q);check(p.width==n&&p.requestedQuality.equals(q),"new internal quality resolves");check(!MediaQuality.cacheVid(VID,q).equals(MediaQuality.cacheVid(VID,"auto")),"separate quality cache namespace");}});
    group("high or unknown candidate and high variant never masquerade as lower resolution",()->{for(int shortEdge:new int[]{0,1080}){callback(a->success(a,shortEdge));Exception e=reject(()->lookup("720p",1079,false));check(eligible(e),"valid missing/larger resolution is typed unavailable");}JSONObject p=model("720p",720,1079);p.put("variants",new JSONArray().put(model("720p",1080,1079)));Exception e=reject(()->PlaybackSources.register(p,VID,false));check(eligible(e),"all variants obey cap");});

@@ -162,6 +162,41 @@ function deriveContentKey(value) {
     return Buffer.from(hex, 'hex');
 }
 
+/** Registered single-model replies use the independently verified native protocol variant. */
+function deriveRegisteredContentKey(value) {
+    const text = str(value);
+    if (!text || text.length > 2048 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(text)) throw new Error('spade_a encoding invalid');
+    const raw = Buffer.from(text.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    if (raw.length < 3 || raw.length > 1024) throw new Error('spade_a length invalid');
+    const tagLength = (raw[0] ^ raw[1] ^ raw[2]) - 48;
+    const length = raw.length - tagLength - 1;
+    if (tagLength < 1 || length < 33 || length >= raw.length) throw new Error('spade_a structure invalid');
+    const seed = raw[raw.length - tagLength - 2] ^ raw[raw.length - tagLength - 1];
+    const tag = Buffer.from(raw.subarray(raw.length - tagLength));
+    for (let i = 0; i < tag.length; i += 1) tag[i] ^= seed;
+    if (['app_v2', 'web_v2'].includes(tag.toString('utf8'))) throw new Error('spade_a format unsupported');
+    const decoded = Buffer.alloc(length), previous = [250, 85];
+    for (let i = 0; i < length; i += 1) {
+        const current = raw[i + 1], pop = i.toString(2).split('1').length - 1;
+        decoded[i] = ((previous[i & 1] ^ current) - 21 - pop) & 255;
+        previous[i & 1] = current;
+    }
+    const keyBytes = decoded.subarray(1, 33);
+    const hex = keyBytes.toString('ascii');
+    if ([...keyBytes].some(byte => byte > 127) || !/^[0-9a-f]{32}$/i.test(hex)) throw new Error('App 视频密钥格式无效');
+    return Buffer.from(hex, 'hex');
+}
+function registeredMediaUrl(value) {
+    const text = str(value);
+    if (text.startsWith('https://')) return text;
+    if (!text || text.length > 32768 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text) || text.length % 4 === 1) {
+        throw Object.assign(new Error('App 单集片源编码无效'), { code: 'INVALID_RESPONSE' });
+    }
+    const decoded = Buffer.from(text, 'base64').toString('utf8');
+    if (!decoded.startsWith('https://')) throw Object.assign(new Error('App 单集片源地址无效'), { code: 'SECURITY_BLOCKED' });
+    return decoded;
+}
+
 function decryptSpadeUrl(value, seed) {
     const encoded = str(value); if (!encoded) return '';
     const raw = Buffer.from(encoded, 'base64');
@@ -253,26 +288,41 @@ async function fetchAppPlayUrl(vid, options = {}) {
     }
     vid = String(vid || '');
     if (!/^\d{1,30}$/.test(vid)) throw new Error('分集编号无效');
-    const deadline = Date.now() + 12000;
-    const signal = AbortSignal.timeout(12000);
+    const lookupTimeout = options.lookupTimeoutMs === undefined ? 12000 : options.lookupTimeoutMs;
+    if (!Number.isSafeInteger(lookupTimeout) || lookupTimeout < 1 || lookupTimeout > 12000) throw Object.assign(new Error('App 片源请求期限无效'), { code: 'INVALID_INPUT' });
+    const deadline = Date.now() + lookupTimeout;
+    const signal = options.signal || AbortSignal.timeout(lookupTimeout);
     const payload = JSON.stringify({
         biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
         mixed_video_id_map: { '1004': [vid] },
     });
-    const signed = signedVideoRequest(payload);
-    const response = await requestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal, 'model_post');
-    if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
-    const entry = response.data?.[vid];
-    const model = typeof entry?.video_model === 'string' ? jsonBody(entry.video_model) : entry?.video_model;
-    if (!model) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: entry?.video_model ? 'INVALID_RESPONSE' : 'MISSING_MODEL' });
-    const fallback = parseFallback(model.fallback_api);
-    if (!fallback) throw Object.assign(new Error('App 接口未返回本集片源地址'), { code: 'MISSING_MODEL' });
-    const outer = await requestJson(fallback, { headers: { 'User-Agent': VIDEO_UA } }, deadline, signal, 'fallback_get');
-    if ([outer, outer.video_info].some(value => Number(value?.Code || value?.code || 0) !== 0)) {
-        throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
+    let info, registered = false;
+    try {
+        const signed = signedVideoRequest(payload);
+        const response = await requestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal, 'model_post');
+        if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
+        const entry = response.data?.[vid];
+        const model = typeof entry?.video_model === 'string' ? jsonBody(entry.video_model) : entry?.video_model;
+        if (!model) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: entry?.video_model ? 'INVALID_RESPONSE' : 'MISSING_MODEL' });
+        const fallback = parseFallback(model.fallback_api);
+        if (!fallback) throw Object.assign(new Error('App 接口未返回本集片源地址'), { code: 'MISSING_MODEL' });
+        const outer = await requestJson(fallback, { headers: { 'User-Agent': VIDEO_UA } }, deadline, signal, 'fallback_get');
+        if ([outer, outer.video_info].some(value => Number(value?.Code || value?.code || 0) !== 0)) {
+            throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
+        }
+        info = outer?.video_info?.data;
+        if (!info) throw Object.assign(new Error('App 接口未返回本集片源模型'), { code: 'MISSING_MODEL' });
+    } catch (error) {
+        // Only a locally classified empty model POST can take this Android opt-in path.
+        // Desktop callers, valid business refusals, wrong IDs, HTML and fallback GET errors keep their old behavior.
+        if (error?.code !== 'APP_EMPTY_RESPONSE' || error.responseStage !== 'model_post' || typeof options.registeredModelProvider !== 'function') throw error;
+        const reply = await options.registeredModelProvider(vid);
+        if (!reply || reply.vid !== vid || !reply.video_model || typeof reply.video_model !== 'object' || Array.isArray(reply.video_model)) {
+            throw Object.assign(new Error('App 已登记设备的单集模型与请求不一致'), { code: 'APP_INVALID_RESPONSE' });
+        }
+        info = reply.video_model; registered = true;
+        if (!info.video_list || typeof info.video_list !== 'object') throw Object.assign(new Error('App 单集模型缺少有效片源列表'), { code: 'APP_INVALID_RESPONSE' });
     }
-    const info = outer?.video_info?.data;
-    if (!info) throw Object.assign(new Error('App 接口未返回本集片源模型'), { code: 'MISSING_MODEL' });
     const rows = Object.values(info?.video_list || {}).filter(item => item && (item.main_url || item.backup_url || Array.isArray(item.backup_url_list))).map(item => {
         const codec = str(item.codec_type || item.video_meta?.codec_type).toLowerCase();
         const codecRank = ['h264', 'avc', 'avc1'].includes(codec) ? 0 : ['hevc', 'h265', 'hvc1', 'hev1', 'bytevc1'].includes(codec) ? 1 : 2;
@@ -300,11 +350,11 @@ async function fetchAppPlayUrl(vid, options = {}) {
     for (const selected of rows) {
         try {
             const spade = selected.item.spade_a || selected.item.encrypt_info?.spade_a;
-            const key = spade ? deriveContentKey(spade) : null;
+            const key = spade ? (registered ? deriveRegisteredContentKey(spade) : deriveContentKey(spade)) : null;
             for (const candidate of [selected.item.main_url, selected.item.backup_url, ...(Array.isArray(selected.item.backup_url_list) ? selected.item.backup_url_list : [])]) {
                 if (typeof candidate !== 'string' || !candidate) continue;
                 try {
-                    const media = info.key_seed
+                    const media = registered ? registeredMediaUrl(candidate) : info.key_seed
                         ? decryptSpadeUrl(candidate, Buffer.from(info.key_seed, 'base64'))
                         : cleanUrl(candidate);
                     const url = checkedUrl(media, ['qznovelvod.com', 'fqnovelvod.com', 'douyinvod.com']);
@@ -313,7 +363,7 @@ async function fetchAppPlayUrl(vid, options = {}) {
                     if (seen.has(identity)) continue;
                     seen.add(identity);
                     variants.push({ url, contentKey, codec: selected.codec === 'bytevc1' ? 'hevc' : selected.codec, source: 'app', vid,
-                        userAgent: VIDEO_UA, referer: '', quality: requestedQuality === 'auto' ? selected.quality : requestedQuality,
+                        userAgent: registered ? VIDEO_UA.replace('71332', '73532') : VIDEO_UA, referer: '', quality: requestedQuality === 'auto' ? selected.quality : requestedQuality,
                         ...(selected.width > 0 && selected.height > 0 ? { width: selected.width, height: selected.height } : {}) });
                 } catch (error) { lastError = error; }
             }

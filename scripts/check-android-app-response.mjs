@@ -20,7 +20,7 @@ const bundle=await build({entryPoints:[path.join(adapter,'entry.mjs')],bundle:tr
 function browser(stage,body,status=200){
  const calls=[],window={AndroidCrypto:{process(raw){const r=JSON.parse(raw);assert.equal(r.operation,'digest');return JSON.stringify({data:crypto.createHash(r.algorithm).update(Buffer.from(r.data,'base64')).digest('base64'),error:null});}}};
  const context=vm.createContext({window,URL,URLSearchParams,AbortSignal,AbortController,setTimeout,clearTimeout,crypto:{getRandomValues:b=>crypto.webcrypto.getRandomValues(b)}});vm.runInContext(bundle.outputFiles[0].text,context);
- context.SharedSource.registerAppResolver(async(method,params)=>{calls.push({method,params});if(method!=='appRequest')return{accepted:true};const r=row(params,stage,body,status);return{status:r.status,headers:r.headers,body:r.data,url:params.url};});
+ context.SharedSource.registerAppResolver(async(method,params)=>{calls.push({method,params});if(method==='appRegisteredModel')throw Object.assign(new Error('App 已登记设备的模型接口仍返回空数据'),{code:'APP_EMPTY_RESPONSE'});if(method!=='appRequest')return{accepted:true};const r=row(params,stage,body,status);return{status:r.status,headers:r.headers,body:r.data,url:params.url};});
  return{api:context.SharedSource,window,calls};
 }
 async function failure(api){try{await api.fetchAppPlayUrl(VID,{quality:'1080p'});}catch(e){return e;}throw Error('expected lookup failure');}
@@ -44,7 +44,7 @@ await group('valid JSON business errors, exact VID mismatch and invalid fallback
 await group('actual Android resolver forwards empty/format codes without adding another lookup loop',async()=>{
  for(const stage of ['model_post','fallback_get'])for(const body of ['','null','<html>not JSON</html>']){
   const f=browser(stage,body);await f.window.__androidAppResolve('fixture-76',SID,VID,'1080p');
-  const result=f.calls.find(c=>c.method==='appResolveResult').params;equal(result.errorCode,body.startsWith('<')?'APP_INVALID_RESPONSE':'APP_EMPTY_RESPONSE');equal(result.vid,VID);equal(result.seriesId,SID);equal(result.requestedQuality,'1080p');check(!result.playInfo,'no fake playable result');equal(f.calls.filter(c=>c.method==='appRequest').length,stage==='model_post'?1:2);
+  const result=f.calls.find(c=>c.method==='appResolveResult').params;equal(result.errorCode,body.startsWith('<')?'APP_INVALID_RESPONSE':'APP_EMPTY_RESPONSE');equal(result.vid,VID);equal(result.seriesId,SID);equal(result.requestedQuality,'1080p');check(!result.playInfo,'no fake playable result');equal(f.calls.filter(c=>c.method==='appRequest').length,stage==='model_post'?1:2);equal(f.calls.filter(c=>c.method==='appRegisteredModel').length,stage==='model_post'&&!body.startsWith('<')?1:0);
  }
 });
 await group('valid same-episode 1080p selection and request signing remain intact',async()=>{

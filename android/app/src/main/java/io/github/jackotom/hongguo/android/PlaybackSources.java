@@ -273,7 +273,7 @@ final class PlaybackSources {
         for(int attempt=0;;attempt++) {
             long remaining=TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime());
             if(remaining<=0)throw new AppLookupException("App片源准备超时，请重试","ETIMEDOUT");
-            try {return resolveAppAttempt(sid,vid,requestedQuality,Math.min(14000,remaining),ceiling);}
+            try {return resolveAppAttempt(sid,vid,requestedQuality,Math.min(28000,remaining),ceiling);}
             catch(AppLookupException error) {
                 // Android 12 AddressCache retains negative DNS results for two seconds.
                 long delayMs=RESPONSE_RETRY_CODE.equals(error.code)?700:error.code.equals("ENOTFOUND")||error.code.equals("EAI_AGAIN")?2100:500;
@@ -303,7 +303,15 @@ final class PlaybackSources {
         }
         catch (InterruptedException error) { Thread.currentThread().interrupt(); throw error; }
         catch (TimeoutException error) { throw new AppLookupException("App片源准备超时，请重试","ETIMEDOUT"); }
-        finally { pending.remove(id); }
+        finally {
+            pending.remove(id);
+            // A timed-out or interrupted native waiter must also abort its JS/native
+            // registration/model job; completed replies already own their cleanup.
+            if (!request.future.isDone()) {
+                request.future.cancel(false);
+                host.script("window.__androidAppCancelResolve && window.__androidAppCancelResolve("+JSONObject.quote(id)+")");
+            }
+        }
     }
     static void result(JSONObject params) throws Exception {
         Pending request=pending.get(params.getString("requestId"));

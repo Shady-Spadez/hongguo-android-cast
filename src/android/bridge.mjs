@@ -4,7 +4,7 @@ const METHODS = new Set([
   'getAccount', 'officialSendCode', 'officialLoginSMS', 'officialVerifyMFA', 'officialCancelLogin', 'officialLogout', 'officialSync', 'officialImportGuest',
   'download', 'getDownloads', 'playDownload', 'deleteDownload', 'openExternal',
   'getPlaybackCache', 'clearPlaybackCache',
-  'appRequest', 'appResolveResult', 'getPlaybackOptions', 'setPlaybackOptions',
+  'appRequest', 'appRegisteredModel', 'appResolveResult', 'getPlaybackOptions', 'setPlaybackOptions',
   'getSearchHistory', 'addSearchHistory', 'removeSearchHistory', 'clearSearchHistory', 'searchQuery',
 ]);
 const pending = new Map();
@@ -33,13 +33,14 @@ export function nativeCall(method, params = {}, timeoutMs = method === 'download
   if (!globalThis.window?.AndroidBridge?.postMessage) {
     return Promise.reject(new Error('请在安卓安装包中打开；网页预览未连接设备功能。'));
   }
-  if (method === 'httpGet' && signal?.aborted) return Promise.reject(Object.assign(new Error('页面请求已取消'), { code: 'ERR_CANCELED' }));
+  const cancellable = method === 'httpGet' || method === 'appRegisteredModel';
+  if (cancellable && signal?.aborted) return Promise.reject(Object.assign(new Error('页面请求已取消'), { code: 'ERR_CANCELED' }));
   const id = `android-${Date.now()}-${++sequence}`;
   return new Promise((resolve, reject) => {
     let timer;
     const cleanup = () => {
       clearTimeout(timer);
-      if (method === 'httpGet') signal?.removeEventListener('abort', abort);
+      if (cancellable) signal?.removeEventListener('abort', abort);
       pending.delete(id);
     };
     const cancelNative = () => {
@@ -54,13 +55,13 @@ export function nativeCall(method, params = {}, timeoutMs = method === 'download
     timer = setTimeout(() => {
       if (!pending.has(id)) return;
       cleanup();
-      if (method === 'httpGet') cancelNative();
+      if (cancellable) cancelNative();
       const error = new Error('设备操作超时，请检查网络后重试。');
-      if (method === 'appRequest' || method === 'httpGet') error.code = 'ETIMEDOUT';
+      if (method === 'appRequest' || cancellable) error.code = 'ETIMEDOUT';
       reject(error);
     }, timeoutMs);
     pending.set(id, { resolve, reject, cleanup });
-    if (method === 'httpGet') {
+    if (cancellable) {
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) { abort(); return; }
     }
@@ -81,7 +82,7 @@ if (typeof window !== 'undefined') {
     request.cleanup();
     if (message.error != null) {
       const error = new Error(String(message.error));
-      if (['ETIMEDOUT', 'ERR_CANCELED', 'INVALID_INPUT'].includes(message.errorCode)) error.code = message.errorCode;
+      if (['ETIMEDOUT', 'ERR_CANCELED', 'INVALID_INPUT', 'APP_EMPTY_RESPONSE', 'APP_INVALID_RESPONSE'].includes(message.errorCode)) error.code = message.errorCode;
       request.reject(error);
     }
     else request.resolve(message.result);
