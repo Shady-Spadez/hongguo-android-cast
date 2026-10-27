@@ -248,7 +248,7 @@ final class NativeBridge {
                 if (!planSid.equals(series.getString("seriesId"))) throw new JSONException("片源与剧集不一致");
                 info.put("seriesId", planSid);
                 JSONObject mediaOptions = PlayerOptions.read(activity);
-                String requestedQuality = MediaQuality.normalize(params.optString("quality", info.optString("requestedQuality", "auto")));
+                String requestedQuality = PlayerOptions.quality(params.optString("quality", info.optString("requestedQuality", "auto")));
                 if (info.has("requestedQuality") && !requestedQuality.equals(info.getString("requestedQuality"))) throw new JSONException("清晰度结果不匹配");
                 info.put("requestedQuality", requestedQuality);
                 params.put("quality", requestedQuality);

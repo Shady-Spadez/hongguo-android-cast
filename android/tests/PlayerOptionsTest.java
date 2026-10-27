@@ -32,6 +32,7 @@ public final class PlayerOptionsTest {
     }
     public static void main(String[] args) throws Exception {
         Preferences prefs = new Preferences(); MemoryContext app = new MemoryContext(prefs);
+        for(String internal:new String[]{"480p","360p"}) rejects(()->PlayerOptions.quality(internal),"internal recovery grade must not become a manual download preference");
         JSONObject defaults = PlayerOptions.read(app);
         check(defaults.getString("quality").equals("auto") && defaults.getDouble("speed")==1, "defaults auto/1");
         check(prefs.commits==0 && prefs.data.isEmpty(), "read has no mutation");

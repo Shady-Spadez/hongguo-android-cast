@@ -102,14 +102,16 @@ public final class PlayerActivity extends Activity {
     private boolean cleanup, offline;
     private String currentKind = "正在连接片源", lastMediaError;
     private boolean currentManual, currentCache, currentWeb;
-    private int lastGoodPosition;
+    private int lastGoodPosition, sourceShortEdge, automaticCeiling, protectedCeiling;
+    private Runnable playbackPrepareTimeout, bufferingTimeout;
+    private boolean decoderPreparing;
     private long lastProgressSavedAt;
     private final RecoveryBudget recoveryBudget = new RecoveryBudget();
     static final class RecoveryBudget {
         private int generation; private boolean used;
-        void reset(int token) { generation = token; used = false; }
-        void carry(int previous, int next) { if (generation == previous) generation = next; }
-        boolean take(int token, boolean offline, boolean manual, boolean unsupported) {
+        synchronized void reset(int token) { generation = token; used = false; }
+        synchronized void carry(int previous, int next) { if (generation == previous) generation = next; }
+        synchronized boolean take(int token, boolean offline, boolean manual, boolean unsupported) {
             if (token != generation || used || offline || manual || unsupported) return false;
             used = true; return true;
         }
@@ -148,7 +150,8 @@ public final class PlayerActivity extends Activity {
             JSONObject defaults = PlayerOptions.read(this);
             danmakuEnabled = defaults.optBoolean("danmaku", false);
             quality = PlayerOptions.quality(state == null ? getIntent().getStringExtra("quality") == null ? defaults.getString("quality") : getIntent().getStringExtra("quality") : state.getString("quality", defaults.getString("quality")));
-            actualQuality = state == null ? quality : PlayerOptions.quality(state.getString("actualQuality", quality));
+            actualQuality = state == null ? quality : MediaQuality.normalize(state.getString("actualQuality", quality));
+            automaticCeiling = restoreAutomaticCeiling(state);
             requestedSpeed = PlayerOptions.speed(state == null ? getIntent().getDoubleExtra("speed", defaults.getDouble("speed")) : state.getDouble("speed", defaults.getDouble("speed")));
             boolean restored = restoreSelection(state);
             series = owner(queue.get(current));
@@ -407,8 +410,12 @@ public final class PlayerActivity extends Activity {
     }
     private void savePlaybackState(Bundle state) {
         saveProgress(); state.putInt("position", resumeAt); state.putBoolean("autoplay", autoplay);
-        state.putString("quality", quality); state.putString("actualQuality", actualQuality); state.putDouble("speed", requestedSpeed); state.putBoolean("userPaused", userPaused);
+        state.putString("quality", quality); state.putString("actualQuality", actualQuality); state.putInt("automaticCeiling", automaticCeiling); state.putDouble("speed", requestedSpeed); state.putBoolean("userPaused", userPaused);
         if (episode != null) { state.putString("vid", episode.optString("vid")); state.putString("seriesId", owner(episode).optString("seriesId")); state.putInt("episodeIndex", episode.optInt("index")); }
+    }
+    private static int restoreAutomaticCeiling(Bundle state) {
+        int value = state == null ? 0 : state.getInt("automaticCeiling", 0);
+        return value > 0 && value <= 16384 ? value : 0;
     }
     private JSONObject owner(JSONObject target) { return PlaybackPlaylist.owner(queueSeries == null ? series : queueSeries, target); }
     private String mediaKey(JSONObject target, String stageQuality) { return owner(target).optString("seriesId") + ":" + target.optString("vid") + ":" + target.optInt("index") + ":" + stageQuality; }
@@ -422,28 +429,28 @@ public final class PlayerActivity extends Activity {
     }
     private synchronized void releaseCurrent() {
         if (protectedCurrent && protectedEpisode != null) {
-            cache.release(protectedSeriesId, protectedEpisode.optString("vid"), protectedEpisode.optInt("index"), protectedQuality);
+            cache.release(protectedSeriesId, protectedEpisode.optString("vid"), protectedEpisode.optInt("index"), protectedQuality, protectedCeiling);
             protectedCurrent = false; protectedEpisode = null; protectedSeriesId = "";
             PlaybackCache.QueueWindow releasedWindow = protectedWindow; protectedWindow = null; pruneReleasedWindow(releasedWindow);
         }
     }
     /** A successful stage owns its exact-quality reservation until UI adoption/cancellation. */
     private static final class PreparedMedia {
-        final JSONObject episode, series; final String quality, seriesId; final PlaybackCache.QueueWindow window; boolean protectedKey;
+        final JSONObject episode, series; final String quality, seriesId; final int ceiling; final PlaybackCache.QueueWindow window; boolean protectedKey;
         Uri uri; String remote, kind; PlaybackSources.Plan plan; boolean manual, cached;
-        PreparedMedia(JSONObject series, JSONObject episode, String quality, PlaybackCache.QueueWindow window) { this.series = series; this.seriesId = series.optString("seriesId"); this.episode = episode; this.quality = quality; this.window = window; }
+        PreparedMedia(JSONObject series, JSONObject episode, String quality, int ceiling, PlaybackCache.QueueWindow window) { this.ceiling=ceiling; this.series = series; this.seriesId = series.optString("seriesId"); this.episode = episode; this.quality = quality; this.window = window; }
     }
-    private synchronized PreparedMedia reserveMedia(JSONObject target, String stageQuality, PlaybackCache.QueueWindow window) throws Exception {
+    private synchronized PreparedMedia reserveMedia(JSONObject target, String stageQuality, int ceiling, PlaybackCache.QueueWindow window) throws Exception {
         if (destroyed || Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("播放准备已取消");
-        PreparedMedia media = new PreparedMedia(owner(target), target, stageQuality, window);
-        cache.protect(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
+        PreparedMedia media = new PreparedMedia(owner(target), target, stageQuality, ceiling, window);
+        cache.protect(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling);
         media.protectedKey = true; pendingMedia.add(media); return media;
     }
     private synchronized void releasePrepared(PreparedMedia media) {
         if (media == null) return;
         pendingMedia.remove(media);
         if (media.protectedKey) {
-            cache.release(media.seriesId, media.episode.optString("vid"), media.episode.optInt("index"), media.quality);
+            cache.release(media.seriesId, media.episode.optString("vid"), media.episode.optInt("index"), media.quality, media.ceiling);
             media.protectedKey = false;
             pruneReleasedWindow(media.window);
         }
@@ -453,26 +460,27 @@ public final class PlayerActivity extends Activity {
     }
     private synchronized void adoptMedia(PreparedMedia media) {
         releaseCurrent(); pendingMedia.remove(media);
-        protectedQuality = media.quality; protectedCurrent = media.protectedKey;
+        protectedQuality = media.quality; protectedCeiling = media.ceiling; protectedCurrent = media.protectedKey;
         protectedEpisode = media.episode; protectedSeriesId = media.seriesId; protectedWindow = media.window; media.protectedKey = false;
-        actualQuality = media.quality;
+        actualQuality = media.quality; automaticCeiling = media.ceiling;
     }
-    private PreparedMedia prepareMedia(JSONObject target, String stageQuality, String initialUrl, boolean recovering, boolean failedWeb, boolean allowDownloads, PlaybackCache.QueueWindow window) throws Exception {
-        PreparedMedia media = reserveMedia(target, stageQuality, window);
+    private PreparedMedia prepareMedia(JSONObject target, String stageQuality, String initialUrl, boolean recovering, boolean failedWeb, boolean allowDownloads, int maximumEdge, PlaybackCache.QueueWindow window) throws Exception {
+        int ceiling=stageCeiling(stageQuality, maximumEdge);
+        PreparedMedia media = reserveMedia(target, stageQuality, ceiling, window);
         boolean success = false;
         try {
             Uri local = allowDownloads && offline && initialUrl != null ? Uri.parse(initialUrl) : allowDownloads && (offline || "auto".equals(stageQuality)) ? downloaded(target) : null;
             if (recovering) local = null;
             if (offline && local == null) throw new Exception("这集的手动下载文件已被移除，请返回下载页检查");
-            File cached = !recovering && local == null ? cache.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality) : null;
+            File cached = !recovering && local == null ? cache.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling) : null;
             if (local != null) { media.uri = local; media.kind = "手动下载 · 本地播放"; media.manual = true; }
             else if (cached != null) { media.uri = Uri.fromFile(cached); media.kind = "播放缓存 · 本地播放"; media.cached = true; }
             else {
                 if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("播放准备已取消");
                 if (recovering) {
-                    cache.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
-                    media.plan = PlaybackSources.recover(media.seriesId, target.optString("vid"), stageQuality, failedWeb);
-                } else if (initialUrl != null) {
+                    cache.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling);
+                    media.plan = PlaybackSources.resolvePlayback(media.seriesId, target.optString("vid"), stageQuality, ceiling, true, failedWeb);
+                } else if (initialUrl != null && ceiling == 0) {
                     media.plan = PlaybackSources.find(initialUrl, stageQuality);
                     if (media.plan == null) {
                         String saved = getIntent().getStringExtra("playInfo");
@@ -480,15 +488,75 @@ public final class PlayerActivity extends Activity {
                         info.put("requestedQuality", stageQuality);
                         media.plan = PlaybackSources.register(info, target.optString("vid"), false);
                     }
-                } else media.plan = PlaybackSources.resolve(media.seriesId, target.optString("vid"), stageQuality);
+                } else media.plan = PlaybackSources.resolvePlayback(media.seriesId, target.optString("vid"), stageQuality, ceiling, false, failedWeb);
                 if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("播放准备已取消");
+                if (media.plan.playbackCeiling != ceiling) throw new java.io.IOException("播放片源清晰度边界不匹配");
                 if (!media.plan.source.equals("web") || !"auto".equals(stageQuality)) {
-                    File ready = cache.fetchForeground(media.seriesId, target.optString("vid"), target.optInt("index"), media.plan.url, stageQuality);
+                    File ready = cache.fetchForeground(media.seriesId, target.optString("vid"), target.optInt("index"), media.plan, stageQuality);
                     media.uri = Uri.fromFile(ready); media.kind = "片源已准备 · 缓存播放"; media.cached = true;
                 } else { media.remote = media.plan.url; media.uri = Uri.parse(media.remote); media.kind = "在线播放 · 滚动缓存"; }
             }
             success = true; return media;
         } finally { if (!success) releasePrepared(media); }
+    }
+    private static int stageCeiling(String quality, int maximumEdge) {
+        int fixed = AdaptiveQuality.ceiling(quality);
+        // Public 720p/1080p preferences retain their established minimum semantics.
+        // A ceiling is introduced only by automatic descent or an internal low stage.
+        if (maximumEdge <= 0 && !"480p".equals(quality) && !"360p".equals(quality)) return 0;
+        return maximumEdge <= 0 ? fixed : fixed <= 0 ? maximumEdge : Math.min(fixed, maximumEdge);
+    }
+    /** One fresh reconnect belongs to a logical selection, never to every lower stage. */
+    private PreparedMedia prepareStage(JSONObject target, String stageQuality, String initialUrl, boolean fresh, boolean failedWeb, int token, int maximumEdge, PlaybackCache.QueueWindow window) throws Exception {
+        try { return prepareMedia(target, stageQuality, initialUrl, fresh, failedWeb, true, maximumEdge, window); }
+        catch (Exception first) {
+            if (offline || fresh || !PlaybackSources.canRecoverPlayback(first) || destroyed || token != generation || Thread.currentThread().isInterrupted()
+                    || !recoveryBudget.take(token, false, false, false)) throw first;
+            main.post(() -> { if (!destroyed && token == generation) { status.setText("片源暂未取得 · 正在自动重新取源 " + qualityLabel(stageQuality)); showControls(); } });
+            try { return prepareMedia(target, stageQuality, null, true, failedWeb, true, maximumEdge, window); }
+            catch (Exception retry) { if (retry != first) retry.addSuppressed(first); throw retry; }
+        }
+    }
+    private void cancelPlaybackWatchdogs() {
+        if (playbackPrepareTimeout != null) { main.removeCallbacks(playbackPrepareTimeout); playbackPrepareTimeout = null; }
+        if (bufferingTimeout != null) { main.removeCallbacks(bufferingTimeout); bufferingTimeout = null; }
+    }
+    private boolean validPlaybackCallback(int token, VideoView view) {
+        return !destroyed && token == generation && view == video && !casting() && !castWasActive;
+    }
+    private void armPreparationTimeout(int token, VideoView view) {
+        if (playbackPrepareTimeout != null) main.removeCallbacks(playbackPrepareTimeout);
+        decoderPreparing = true;
+        final Runnable[] captured = new Runnable[1];
+        playbackPrepareTimeout = captured[0] = () -> {
+            if (playbackPrepareTimeout != captured[0]) return;
+            playbackPrepareTimeout = null;
+            if (!validPlaybackCallback(token, view) || !decoderPreparing || prepared || !active) return;
+            failCurrentMedia(token, "设备准备视频超时，正在尝试其他片源", false);
+        };
+        main.postDelayed(playbackPrepareTimeout, 20000);
+    }
+    private void updateBufferingWatchdog(int token, VideoView view) {
+        boolean needed = validPlaybackCallback(token, view) && active && prepared && !completed && !userPaused && buffering && qualitySwitch == null;
+        if (!needed) { if (bufferingTimeout != null) { main.removeCallbacks(bufferingTimeout); bufferingTimeout = null; } return; }
+        if (bufferingTimeout != null) return;
+        final Runnable[] captured = new Runnable[1];
+        bufferingTimeout = captured[0] = () -> {
+            if (bufferingTimeout != captured[0]) return;
+            bufferingTimeout = null;
+            if (!validPlaybackCallback(token, view) || !active || !prepared || completed || userPaused || !buffering || qualitySwitch != null) return;
+            failCurrentMedia(token, "视频持续缓冲超时，正在自动重新取源", false);
+        };
+        main.postDelayed(bufferingTimeout, 30000);
+    }
+    private int observedShortEdge() {
+        return videoWidth > 0 && videoHeight > 0 ? Math.min(videoWidth, videoHeight) : sourceShortEdge;
+    }
+    private void failCurrentMedia(int token, String reason, boolean unsupported) {
+        if (!validPlaybackCallback(token, video)) return;
+        cancelPlaybackWatchdogs(); decoderPreparing = false;
+        if (!recoverMedia(token, unsupported ? MediaPlayer.MEDIA_ERROR_UNSUPPORTED : 1, 0, reason) && !lowerCurrentMedia(token, reason))
+            playbackError(token, reason + (lastMediaError == null || lastMediaError.equals(reason) ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集");
     }
     private void stageProgress(int token, String stageQuality, int stage, boolean switching) {
         main.post(() -> {
@@ -505,19 +573,20 @@ public final class PlayerActivity extends Activity {
     }
     private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb) {
         if (destroyed || position < 0 || position >= queue.size()) return;
-        cancelQualitySwitch(); if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
+        cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
         current = position; episode = queue.get(current); series = owner(episode); final JSONObject target = episode, targetSeries = series;
         if (!offline) {
             if (localWindow == null) localWindow = cache.openQueueWindow(queueSeries == null ? series : queueSeries, queue, current, cleanup, 1, false);
             else localWindow.moveTo(current);
         }
         final int previousToken = generation, token = ++generation; final String targetQuality = actualQuality;
+        final int maximumEdge = automaticCeiling;
         if (danmaku != null) danmaku.suspend();
         final PlaybackCache.QueueWindow targetWindow = localWindow;
         discardPendingMedia();
-        if (recovering) recoveryBudget.carry(previousToken, token); else { recoveryBudget.reset(token); lastMediaError = null; }
+        if (recovering) recoveryBudget.carry(previousToken, token); else { recoveryBudget.reset(token); lastMediaError = null; currentManual = false; currentCache = false; currentWeb = false; }
         resumeAt = Math.max(0, startAt); lastGoodPosition = resumeAt; prepared = false; completed = false; userPaused = remainPaused;
-        actualSpeed = Float.NaN; videoWidth = videoHeight = 0;
+        actualSpeed = Float.NaN; videoWidth = videoHeight = sourceShortEdge = 0;
         title.setText(series.optString("title") + " · 第 " + target.optInt("index") + " 集");
         currentKind = "正在连接片源"; status.setText(currentKind); time.setText("00:00 / --:--"); seek.setProgress(0); showControls(); updateButtons();
         pruneCache();
@@ -525,22 +594,25 @@ public final class PlayerActivity extends Activity {
         resolution = resolver.submit(() -> {
             try {
                 AdaptiveQuality.Result<PreparedMedia> result = AdaptiveQuality.prepare(targetQuality,
-                    stageQuality -> prepareMedia(target, stageQuality, stageQuality.equals(targetQuality) ? initialUrl : null, recovering, failedWeb, true, targetWindow),
-                    error -> !offline && PlaybackSources.canLowerQuality(error),
+                    stageQuality -> prepareStage(target, stageQuality, stageQuality.equals(targetQuality) ? initialUrl : null, recovering || !stageQuality.equals(targetQuality), failedWeb, token, stageQuality.equals(targetQuality) ? maximumEdge : stageCeiling(stageQuality, maximumEdge > 0 ? maximumEdge : AdaptiveQuality.ceiling(stageQuality)), targetWindow),
+                    error -> !offline && PlaybackSources.canRecoverPlayback(error),
                     () -> !destroyed && token == generation,
                     (stageQuality, stage, error) -> stageProgress(token, stageQuality, stage, false), this::releasePrepared);
                 final PreparedMedia media = result.value; final String playedQuality = result.quality;
                 main.post(() -> {
                     if (destroyed || token != generation) { releasePrepared(media); return; }
                     adoptMedia(media);
-                    currentKind = media.kind; currentManual = media.manual; currentCache = media.cached; currentWeb = media.remote != null; renderStatus();
+                    currentKind = media.kind; currentManual = media.manual; currentCache = media.cached; currentWeb = media.remote != null;
+                    sourceShortEdge = media.plan != null && media.plan.width > 0 && media.plan.height > 0 ? Math.min(media.plan.width, media.plan.height) : 0; renderStatus();
                     VideoView targetView = video;
                     bindPlayback(targetView, token, target, media.remote, playedQuality);
                     targetView.setOnPreparedListener(player -> {
                         if (destroyed || token != generation || video != targetView) return;
-                        if (!offline && !"auto".equals(playedQuality) && !MediaQuality.meets(player.getVideoWidth(), player.getVideoHeight(), playedQuality)) {
-                            String reason = "当前片源的实际分辨率未达到 " + qualityLabel(playedQuality);
-                            if (!lowerCurrentMedia(token, reason)) playbackError(token, reason); return;
+                        cancelPlaybackWatchdogs(); decoderPreparing = false;
+                        videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
+                        if (!offline && !media.manual && (!MediaQuality.meets(videoWidth, videoHeight, playedQuality)
+                                || media.ceiling > 0 && (videoWidth <= 0 || videoHeight <= 0 || Math.min(videoWidth, videoHeight) > media.ceiling))) {
+                            failCurrentMedia(token, "当前片源实际分辨率不符合 " + qualityLabel(playedQuality) + " 播放档位", false); return;
                         }
                         mediaPlayer = player; prepared = true; completed = false;
                         watchProgressSeeks(player, token, targetView);
@@ -551,12 +623,13 @@ public final class PlayerActivity extends Activity {
                         if (resumeAt > 0 && (video.getDuration() <= 0 || resumeAt < video.getDuration() - 1500)) video.seekTo(resumeAt);
                         if (active && !userPaused) video.start();
                         recordProgress(targetSeries, target, resumeAt); renderStatus(); updateButtons();
-                        if (!offline && media.remote != null) cacheEpisode(target, media.remote, playedQuality);
+                        if (!offline && media.remote != null) cacheEpisode(media.seriesId, target, media.plan, playedQuality, token);
                         if (!offline && autoplay) schedulePrefetch(token);
                     });
                     Map<String, String> headers = new HashMap<>();
                     headers.put("User-Agent", media.plan == null ? NetworkGuard.UA : media.plan.userAgent); headers.put("Referer", media.plan == null ? NetworkGuard.REFERER : media.plan.referer);
-                    targetView.setVideoURI(media.uri, headers);
+                    try { armPreparationTimeout(token, targetView); targetView.setVideoURI(media.uri, headers); }
+                    catch (RuntimeException error) { failCurrentMedia(token, "设备打开视频未成功：" + error.getMessage(), false); }
                 });
             } catch (Exception error) { main.post(() -> playbackError(token, recovering ? "自动恢复未成功：" + error.getMessage() + "；原错误：" + lastMediaError : error.getMessage())); }
         });
@@ -567,12 +640,13 @@ public final class PlayerActivity extends Activity {
         view.setOnInfoListener((player, what, extra) -> {
             if (destroyed || token != generation || video != view) return false;
             if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START || what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
-                buffering = what == MediaPlayer.MEDIA_INFO_BUFFERING_START; updateControlsState();
+                buffering = what == MediaPlayer.MEDIA_INFO_BUFFERING_START; updateBufferingWatchdog(token, view); updateControlsState();
             }
             return false;
         });
         view.setOnCompletionListener(player -> {
             if (destroyed || token != generation || video != view) return;
+            cancelPlaybackWatchdogs(); decoderPreparing = false;
             completed = true; resumeAt = 0; recordProgress(targetSeries, target, 0);
             if (autoplay && current + 1 < queue.size()) loadAt(current + 1, null, 0);
             else { currentKind = current + 1 == queue.size() ? "本剧已播完" : "本集已播完 · 可点击下一集"; renderStatus(); showControls(); updateButtons(); }
@@ -580,12 +654,13 @@ public final class PlayerActivity extends Activity {
         view.setOnErrorListener((player, what, extra) -> {
             if (token == generation && !destroyed && video == view) {
                 String reason = "当前片源或设备解码暂不可用（" + what + "/" + extra + "）";
-                if (!recoverMedia(token, what, extra, reason) && !lowerCurrentMedia(token, reason)) playbackError(token, reason + (lastMediaError == null ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集");
+                failCurrentMedia(token, reason, what == MediaPlayer.MEDIA_ERROR_UNSUPPORTED || extra == MediaPlayer.MEDIA_ERROR_UNSUPPORTED);
             }
             return true;
         });
     }
     private boolean recoverMedia(int token, int what, int extra, String reason) {
+        if (!validPlaybackCallback(token, video)) return false;
         boolean unsupported = what == MediaPlayer.MEDIA_ERROR_UNSUPPORTED || extra == MediaPlayer.MEDIA_ERROR_UNSUPPORTED;
         if (!recoveryBudget.take(token, offline, currentManual, unsupported)) return false;
         int position = Math.max(0, lastGoodPosition);
@@ -599,19 +674,23 @@ public final class PlayerActivity extends Activity {
         currentKind = "片源中断 · 正在自动恢复本集"; renderStatus(); return true;
     }
     private boolean lowerCurrentMedia(int token, String reason) {
-        if (destroyed || token != generation || offline || currentManual) return false;
-        String lower = AdaptiveQuality.next(actualQuality); if (lower == null) return false;
+        if (!validPlaybackCallback(token, video) || offline || currentManual) return false;
+        int observed = observedShortEdge();
+        String lower = AdaptiveQuality.next(actualQuality, observed); if (lower == null) return false;
+        int lowerCeiling = AdaptiveQuality.ceiling(lower);
+        if (observed > 0) lowerCeiling = Math.min(lowerCeiling, observed - 1);
+        int nextCeiling = automaticCeiling <= 0 ? lowerCeiling : Math.min(automaticCeiling, lowerCeiling);
         int position = Math.max(0, lastGoodPosition);
         try { int actual = video.getCurrentPosition(); if (actual > 0) position = actual; } catch (RuntimeException ignored) { }
         float confirmed = mediaPlayer == null ? Float.NaN : PlayerOptions.observedSpeed(mediaPlayer);
         if (!Float.isFinite(confirmed)) confirmed = actualSpeed;
         if (Float.isFinite(confirmed)) requestedSpeed = confirmed;
-        try { cache.invalidate(owner(episode).optString("seriesId"), episode.optString("vid"), episode.optInt("index"), actualQuality); }
+        try { cache.invalidate(owner(episode).optString("seriesId"), episode.optString("vid"), episode.optInt("index"), actualQuality, protectedCeiling); }
         catch (Exception error) { return false; }
         // Decoder/size failures move only down. Carry a consumed reconnect allowance across every stage.
         recoveryBudget.take(token, false, false, false);
         lastMediaError = reason; boolean wasPaused = userPaused, wasWeb = currentWeb;
-        actualQuality = lower;
+        actualQuality = lower; automaticCeiling = nextCeiling;
         loadAtInternal(current, null, position, wasPaused, true, wasWeb);
         currentKind = "当前档播放未成功 · 自动降低至 " + qualityLabel(lower); renderStatus(); return true;
     }
@@ -638,7 +717,7 @@ public final class PlayerActivity extends Activity {
         }).setNegativeButton("关闭", null).create());
     }
     private static final class QualitySwitch {
-        final int generation, serial; final String quality; final JSONObject episode; final PlaybackCache.QueueWindow window;
+        final int generation, serial; int ceiling, observedShortEdge; final String quality; final JSONObject episode; final PlaybackCache.QueueWindow window;
         Future<?> work; VideoView view; MediaPlayer player; Runnable timeout; PreparedMedia media;
         QualitySwitch(int generation, int serial, String quality, JSONObject episode, PlaybackCache.QueueWindow window) { this.generation = generation; this.serial = serial; this.quality = quality; this.episode = episode; this.window = window; }
     }
@@ -669,7 +748,7 @@ public final class PlayerActivity extends Activity {
     }
     private void switchQuality(String requested) {
         if (!prepared || offline || destroyed) return;
-        cancelQualitySwitch(); if (requested.equals(quality) && requested.equals(actualQuality)) { renderStatus(); updateButtons(); return; }
+        cancelQualitySwitch(); cancelPlaybackWatchdogs(); if (requested.equals(quality) && requested.equals(actualQuality)) { renderStatus(); updateButtons(); return; }
         final QualitySwitch job = new QualitySwitch(generation, ++qualitySerial, requested, episode, localWindow); qualitySwitch = job;
         status.setText(currentKind + " · 后台准备 " + qualityLabel(requested) + "；当前播放保持"); updateButtons();
         resolveQualitySwitch(job, requested);
@@ -679,8 +758,8 @@ public final class PlayerActivity extends Activity {
         try { job.work = resolver.submit(() -> {
             try {
                 AdaptiveQuality.Result<PreparedMedia> result = AdaptiveQuality.prepare(startQuality,
-                    stageQuality -> prepareMedia(job.episode, stageQuality, null, false, false, false, job.window),
-                    PlaybackSources::canLowerQuality, () -> validSwitch(job),
+                    stageQuality -> prepareMedia(job.episode, stageQuality, null, !stageQuality.equals(job.quality) || job.ceiling > 0, false, false, stageQuality.equals(job.quality) ? job.ceiling : stageCeiling(stageQuality, job.ceiling > 0 ? job.ceiling : AdaptiveQuality.ceiling(stageQuality)), job.window),
+                    PlaybackSources::canRecoverPlayback, () -> validSwitch(job),
                     (stageQuality, stage, error) -> main.post(() -> { if (validSwitch(job)) { status.setText((stage == 1 && startQuality.equals(job.quality) ? "后台准备 " : "当前档多次失败 · 自动降低至 ") + qualityLabel(stageQuality) + " 视频…；当前播放保持"); showControls(); } }), this::releasePrepared);
                 PreparedMedia media = result.value;
                 main.post(() -> {
@@ -705,7 +784,9 @@ public final class PlayerActivity extends Activity {
                 // Some decoders start as a side effect of setPlaybackParams. The candidate
                 // must stay silent until the old player stops and the preference commit succeeds.
                 mp.setVolume(0f, 0f);
-                if (!MediaQuality.meets(mp.getVideoWidth(), mp.getVideoHeight(), job.media.quality)) {
+                job.observedShortEdge = mp.getVideoWidth() > 0 && mp.getVideoHeight() > 0 ? Math.min(mp.getVideoWidth(), mp.getVideoHeight()) : 0;
+                if (!MediaQuality.meets(mp.getVideoWidth(), mp.getVideoHeight(), job.media.quality)
+                        || job.media.ceiling > 0 && (job.observedShortEdge <= 0 || job.observedShortEdge > job.media.ceiling)) {
                     String reason = "实际分辨率 " + mp.getVideoWidth() + "×" + mp.getVideoHeight() + " 未达到当前清晰度";
                     if (!lowerQualitySwitch(job, reason)) failQualitySwitch(job, reason); return;
                 }
@@ -727,8 +808,12 @@ public final class PlayerActivity extends Activity {
     }
     private boolean lowerQualitySwitch(QualitySwitch job, String reason) {
         if (!validSwitch(job) || job.media == null) return false;
-        String lower = AdaptiveQuality.next(job.media.quality); if (lower == null) return false;
-        try { cache.invalidate(job.media.seriesId, job.episode.optString("vid"), job.episode.optInt("index"), job.media.quality); }
+        String lower = AdaptiveQuality.next(job.media.quality, job.observedShortEdge); if (lower == null) return false;
+        int lowerCeiling = AdaptiveQuality.ceiling(lower);
+        if (job.observedShortEdge > 0) lowerCeiling = Math.min(lowerCeiling, job.observedShortEdge - 1);
+        job.ceiling = job.ceiling <= 0 ? lowerCeiling : Math.min(job.ceiling, lowerCeiling);
+        job.observedShortEdge = 0;
+        try { cache.invalidate(job.media.seriesId, job.episode.optString("vid"), job.episode.optInt("index"), job.media.quality, job.media.ceiling); }
         catch (Exception error) { return false; }
         if (job.timeout != null) main.removeCallbacks(job.timeout);
         if (job.player != null) job.player.setOnSeekCompleteListener(null);
@@ -751,6 +836,7 @@ public final class PlayerActivity extends Activity {
             video = job.view; mediaPlayer = job.player; quality = job.quality;
             mediaPlayer.setVolume(1f, 1f);
             qualitySwitch = null; if (job.timeout != null) main.removeCallbacks(job.timeout);
+            automaticCeiling = job.media.ceiling;
             actualSpeed = accepted; if (Float.isFinite(accepted)) requestedSpeed = accepted; videoWidth = mediaPlayer.getVideoWidth(); videoHeight = mediaPlayer.getVideoHeight();
             bindPlayback(video, generation, episode, job.media.remote, actualQuality);
             final VideoView currentView = video; final int token = generation;
@@ -758,7 +844,7 @@ public final class PlayerActivity extends Activity {
             mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
             currentManual = false; currentCache = job.media.cached; currentWeb = job.media.remote != null;
             currentKind = "清晰度已切换 · " + job.media.kind; renderStatus(); updateButtons(); showControls(); pruneCache();
-            if (job.media.remote != null) cacheEpisode(episode, job.media.remote, actualQuality);
+            if (job.media.remote != null) cacheEpisode(job.media.seriesId, episode, job.media.plan, actualQuality, generation);
             if (autoplay) schedulePrefetch(generation);
         } catch (Exception error) { failQualitySwitch(job, error.getMessage()); }
     }
@@ -787,7 +873,7 @@ public final class PlayerActivity extends Activity {
     }
     private void playbackError(int token, String message) {
         if (destroyed || token != generation || isFinishing()) return;
-        cancelQualitySwitch();
+        cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false;
         prepared = false; video.stopPlayback(); status.setText(message == null ? "本集片源暂不可用" : message); updateButtons(); showControls();
         showPlayerDialog(new AlertDialog.Builder(this).setTitle("第 " + episode.optInt("index") + " 集暂未播放")
             .setMessage(status.getText()).setPositiveButton("重试", (dialog, which) -> loadAt(current, null, resumeAt))
@@ -845,13 +931,14 @@ public final class PlayerActivity extends Activity {
             PlaybackCache.QueueWindow window = localWindow; if (window != null) { window.moveTo(current); window.prune(); }
         }); } catch (RejectedExecutionException ignored) { }
     }
-    private void cacheEpisode(JSONObject target, String url, String targetQuality) {
-        if (castWasActive) return;
-        final int cacheToken = generation; final String sid = owner(target).optString("seriesId");
-        String path = Uri.parse(url).getPath(); if (path == null || path.toLowerCase(Locale.ROOT).endsWith(".m3u8") || (!path.toLowerCase(Locale.ROOT).endsWith(".mp4") && PlaybackSources.find(url, targetQuality) == null)) return;
-        String key = mediaKey(target, targetQuality); if (!caching.add(key) || destroyed) return;
+    private void cacheEpisode(String sid, JSONObject target, PlaybackSources.Plan plan, String targetQuality, int token) {
+        if (plan == null || destroyed || castWasActive || token != generation) return;
+        final int cacheToken = token, ceiling = plan.playbackCeiling;
+        String path = Uri.parse(plan.url).getPath(); if (path == null || path.toLowerCase(Locale.ROOT).endsWith(".m3u8")) return;
+        String key = sid + ":" + target.optString("vid") + ":" + target.optInt("index") + ":" + targetQuality + ":" + ceiling;
+        if (!caching.add(key)) return;
         try { cacheWorker.execute(() -> {
-            try { if (!destroyed && !castWasActive && cacheToken == generation) cache.fetch(sid, target.optString("vid"), target.optInt("index"), url, targetQuality); }
+            try { if (!destroyed && !castWasActive && cacheToken == generation) cache.fetch(sid, target.optString("vid"), target.optInt("index"), plan, targetQuality); }
             catch (Exception ignored) { /* A cache miss never interrupts streaming. */ }
             finally { caching.remove(key); main.post(this::pruneCache); }
         }); } catch (RejectedExecutionException ignored) { caching.remove(key); }
@@ -859,14 +946,18 @@ public final class PlayerActivity extends Activity {
     private void schedulePrefetch(int token) {
         int nextIndex = current + 1; if (nextIndex >= queue.size() || destroyed || castWasActive) return;
         final String targetQuality = actualQuality;
-        JSONObject following = queue.get(nextIndex); final String sid = owner(following).optString("seriesId"); String key = "resolve:" + mediaKey(following, targetQuality);
+        final int targetCeiling = stageCeiling(targetQuality, automaticCeiling);
+        JSONObject following = queue.get(nextIndex); final String sid = owner(following).optString("seriesId");
+        String key = "resolve:" + sid + ":" + following.optString("vid") + ":" + following.optInt("index") + ":" + targetQuality + ":" + targetCeiling;
         if (!caching.add(key)) return;
         try { cacheWorker.execute(() -> {
             try {
                 if (token != generation || destroyed || !autoplay || castWasActive) return;
-                if (cache.find(sid, following.optString("vid"), following.optInt("index"), targetQuality) != null || ("auto".equals(targetQuality) && downloaded(following) != null)) return;
-                String url = PlaybackSources.resolve(sid, following.optString("vid"), targetQuality).url;
-                if (token == generation && !destroyed && !castWasActive && autoplay && actualQuality.equals(targetQuality)) cacheEpisode(following, url, targetQuality);
+                if (cache.find(sid, following.optString("vid"), following.optInt("index"), targetQuality, targetCeiling) != null
+                        || (targetCeiling == 0 && "auto".equals(targetQuality) && downloaded(following) != null)) return;
+                PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, following.optString("vid"), targetQuality, targetCeiling, false, false);
+                if (token == generation && !destroyed && !castWasActive && autoplay && actualQuality.equals(targetQuality)
+                        && stageCeiling(actualQuality, automaticCeiling) == targetCeiling) cacheEpisode(sid, following, plan, targetQuality, token);
             } catch (Exception ignored) { /* The next episode is checked again when requested. */ }
             finally { caching.remove(key); }
         }); } catch (RejectedExecutionException ignored) { caching.remove(key); }
@@ -875,7 +966,8 @@ public final class PlayerActivity extends Activity {
     private final Runnable tick = new Runnable() { public void run() {
         if (destroyed) return;
         updateDanmaku();
-        if (casting()) { renderCastControls(); main.postDelayed(this, 500); return; }
+        if (casting()) { cancelPlaybackWatchdogs(); decoderPreparing = false; renderCastControls(); main.postDelayed(this, 500); return; }
+        updateBufferingWatchdog(generation, video);
         if (prepared && !dragging) {
             lastGoodPosition = Math.max(0, video.getCurrentPosition());
             seek.setMax(Math.max(1, video.getDuration())); seek.setProgress(lastGoodPosition); time.setText(format(video.getCurrentPosition()) + " / " + format(video.getDuration()));
@@ -953,7 +1045,7 @@ public final class PlayerActivity extends Activity {
         boolean owns = casting();
         if (owns && !before) {
             saveProgressBeforeCast();
-            cancelQualitySwitch(); ++generation;
+            cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; ++generation;
             if (resolution != null) resolution.cancel(true);
             video.stopPlayback(); mediaPlayer = null; discardPendingMedia(); releaseCurrent(); closeLocalWindow();
             prepared = false; completed = false; buffering = false;
@@ -1273,15 +1365,15 @@ public final class PlayerActivity extends Activity {
         if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) { showControls(); toggle.requestFocus(); return true; }
         return super.onKeyDown(key, event);
     }
-    @Override protected void onPause() { active = false; if (danmaku != null) danmaku.suspend(); touchingControls = false; wakeKey = KeyEvent.KEYCODE_UNKNOWN; if (controlsHud != null) controlsHud.suspend(); saveProgress(); if (!casting() && video != null && prepared) video.pause(); super.onPause(); }
-    @Override protected void onResume() { super.onResume(); active = true; if (!casting() && prepared && !completed && !userPaused) video.start(); showControls(); }
+    @Override protected void onPause() { active = false; cancelPlaybackWatchdogs(); if (danmaku != null) danmaku.suspend(); touchingControls = false; wakeKey = KeyEvent.KEYCODE_UNKNOWN; if (controlsHud != null) controlsHud.suspend(); saveProgress(); if (!casting() && video != null && prepared) video.pause(); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); active = true; if (decoderPreparing && !casting() && !castWasActive) armPreparationTimeout(generation, video); updateBufferingWatchdog(generation, video); if (!casting() && prepared && !completed && !userPaused) video.start(); showControls(); }
     @Override protected void onSaveInstanceState(Bundle state) { savePlaybackState(state); super.onSaveInstanceState(state); }
     @Override protected void onDestroy() {
         // Keep file deletion/update blocked until all media handles have been released.
         if (danmaku != null) danmaku.close();
         detachCast();
         if (controlsHud != null) controlsHud.destroy();
-        cancelQualitySwitch(); destroyed = true; ++generation; discardPendingMedia(); main.removeCallbacksAndMessages(null);
+        cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; destroyed = true; ++generation; discardPendingMedia(); main.removeCallbacksAndMessages(null);
         if (video != null) video.stopPlayback(); releaseCurrent(); closeLocalWindow(); resolver.shutdownNow(); cacheWorker.shutdownNow();
         if (registeredPlayer) { registeredPlayer = false; LIVE_PLAYERS.decrementAndGet(); }
         super.onDestroy();

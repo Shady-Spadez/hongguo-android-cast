@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute unchanged production tick/save/pause/seek methods with clock/media/store boundary doubles."""
+"""Execute unchanged production progress methods; watchdog scheduling is a separately-tested boundary."""
 from pathlib import Path
 import re,sys
 source=Path(sys.argv[1]).read_text()
@@ -43,12 +43,12 @@ final class Label{void setText(String x){}}
 final class Main{void postDelayed(Runnable x,long ms){}}
 public final class PlaybackProgressHarness{
  static int checks,groups;static void check(boolean ok,String msg){checks++;if(!ok)throw new AssertionError(msg);}
- boolean active=true,destroyed,prepared=true,completed,dragging,buffering,userPaused,cast;
+ boolean active=true,destroyed,prepared=true,completed,dragging,buffering,userPaused,cast,decoderPreparing;
  Object qualitySwitch;int generation=3,resumeAt,lastGoodPosition,videoWidth,videoHeight;float actualSpeed;long lastProgressSavedAt;
  final VideoView video=new VideoView();MediaPlayer mediaPlayer=new MediaPlayer();final LibraryStore store=new LibraryStore();
  final JSONObject series,episode;final SeekBar seek=new SeekBar();final Label time=new Label();final Main main=new Main();
  PlaybackProgressHarness()throws Exception{series=new JSONObject().put("seriesId","123456789");episode=new JSONObject().put("vid","987654321");}
- boolean casting(){return cast;}JSONObject owner(JSONObject e){return series;}boolean castCommand(String c,long v){return cast;}void updateDanmaku(){}void renderCastControls(){}void renderStatus(){}void updateButtons(){}
+ boolean casting(){return cast;}JSONObject owner(JSONObject e){return series;}boolean castCommand(String c,long v){return cast;}void cancelPlaybackWatchdogs(){}void updateBufferingWatchdog(int token,VideoView view){}void updateDanmaku(){}void renderCastControls(){}void renderStatus(){}void updateButtons(){}
  METHODS
  TICK
  public static void main(String[]args)throws Exception{

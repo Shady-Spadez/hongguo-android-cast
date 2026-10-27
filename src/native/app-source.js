@@ -243,6 +243,14 @@ async function requestJson(url, options, deadline, signal, stage) {
 
 async function fetchAppPlayUrl(vid, options = {}) {
     const requestedQuality = normalizeDownloadQuality(options.quality);
+    // Internal Android playback bounds are opt-in; normal desktop/manual downloads
+    // retain their exact minimum-quality contract and enumeration.
+    const playbackBounded = options.playbackCeiling !== undefined || options.playbackFloor !== undefined;
+    const playbackFloor = options.playbackFloor === undefined ? 0 : options.playbackFloor, playbackCeiling = options.playbackCeiling === undefined ? 0 : options.playbackCeiling;
+    if (playbackBounded && (requestedQuality !== 'auto' || !Number.isSafeInteger(playbackFloor) || !Number.isSafeInteger(playbackCeiling) ||
+        playbackFloor < 0 || playbackFloor > 16384 || playbackCeiling < 0 || playbackCeiling > 16384 || playbackCeiling > 0 && playbackFloor > playbackCeiling)) {
+        throw Object.assign(new Error('播放清晰度边界无效'), { code: 'INVALID_INPUT' });
+    }
     vid = String(vid || '');
     if (!/^\d{1,30}$/.test(vid)) throw new Error('分集编号无效');
     const deadline = Date.now() + 12000;
@@ -274,12 +282,18 @@ async function fetchAppPlayUrl(vid, options = {}) {
             .map(pair => pair.map(Number)).find(pair => pair.every(value => Number.isFinite(value) && value > 0)) || [0, 0];
         const pixels = width && height ? Math.min(width, height) : Number(quality.match(/\d+/)?.[0] || 0);
         return { item, codec, codecRank, quality, pixels, width, height };
-    }).filter(row => row.codecRank < 2 && meetsDownloadQuality(row, requestedQuality)).sort((a, b) => requestedQuality === 'auto'
-        ? a.codecRank - b.codecRank || b.pixels - a.pixels
+    }).filter(row => row.codecRank < 2 && (playbackBounded
+        ? Number.isSafeInteger(row.width) && Number.isSafeInteger(row.height) && row.width > 0 && row.height > 0 &&
+            row.pixels >= playbackFloor && (playbackCeiling === 0 || row.pixels <= playbackCeiling)
+        : meetsDownloadQuality(row, requestedQuality))).sort((a, b) => playbackBounded
+        ? a.codecRank - b.codecRank || a.pixels - b.pixels
+        : requestedQuality === 'auto' ? a.codecRank - b.codecRank || b.pixels - a.pixels
         : Math.min(a.width, a.height) - Math.min(b.width, b.height) || a.codecRank - b.codecRank);
-    if (!rows.length) throw new Error(requestedQuality === 'auto'
-        ? '本集暂未提供兼容的 H.264/HEVC 片源'
-        : `本集暂无尺寸可确认且满足 ${requestedQuality} 的 H.264/HEVC 片源，未降级`);
+    if (!rows.length) {
+        if (playbackBounded) throw Object.assign(new Error('本集暂无尺寸可确认且满足播放清晰度边界的片源'), { code: 'QUALITY_UNAVAILABLE' });
+        throw new Error(requestedQuality === 'auto' ? '本集暂未提供兼容的 H.264/HEVC 片源'
+            : `本集暂无尺寸可确认且满足 ${requestedQuality} 的 H.264/HEVC 片源，未降级`);
+    }
     let lastError;
     const variants = [];
     const seen = new Set();
@@ -300,7 +314,7 @@ async function fetchAppPlayUrl(vid, options = {}) {
                     seen.add(identity);
                     variants.push({ url, contentKey, codec: selected.codec === 'bytevc1' ? 'hevc' : selected.codec, source: 'app', vid,
                         userAgent: VIDEO_UA, referer: '', quality: requestedQuality === 'auto' ? selected.quality : requestedQuality,
-                        ...(requestedQuality === 'auto' ? {} : { width: selected.width, height: selected.height }) });
+                        ...(selected.width > 0 && selected.height > 0 ? { width: selected.width, height: selected.height } : {}) });
                 } catch (error) { lastError = error; }
             }
         } catch (error) { lastError = error; }
