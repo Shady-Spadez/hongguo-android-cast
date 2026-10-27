@@ -3,12 +3,12 @@
   "channel": "android-compatible",
   "flavor": "phone",
   "packageName": "io.github.jackotom.hongguo.android",
-  "versionCode": 37,
-  "versionName": "0.12.14",
+  "versionCode": 38,
+  "versionName": "0.12.15",
   "minSdk": 26,
-  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.14/Hongguo-0.12.14-phone-release-compatible.apk",
-  "size": 504052,
-  "sha256": "45801c81eb70d0b0dd871a89c98aa563ff290c3149f272a62feea073100d2c1e",
-  "notes": "修复升级后首次打开版本页误显示“更新包已验证，可继续安装”：仅完整验证成功才恢复可安装状态，清理同版已安装及无效缓存；保留合法新版缓存、授权返回续装和记录落盘。账号、收藏、观看进度功能保持。\n",
-  "publishedAt": "2026-10-27T00:19:41.076Z"
+  "apkUrl": "https://github.com/skydeadpeng/hongguo-android-cast/releases/download/v0.12.15/Hongguo-0.12.15-phone-release-compatible.apk",
+  "size": 509348,
+  "sha256": "d90dc9d90ac22631e91a8c999d768aaf8e82b22b1696f8b67c5a20de3234b723",
+  "notes": "新增离线视频删除：下载页每集提供“删除”，未完成的系统下载可“取消并删除”；二次确认后移除该集文件及本机下载记录，支持损坏、丢失文件与失败重试。\n删除时保护播放、投屏及媒体准备任务；兼容旧下载记录，校验文件归属，防止迟到刷新让已删除项目重新出现。\n收藏、观看进度、红果账号同步及播放缓存保持；手机和 TV 均支持确认、取消及返回键操作。\n",
+  "publishedAt": "2026-10-27T00:51:48.021Z"
 }
