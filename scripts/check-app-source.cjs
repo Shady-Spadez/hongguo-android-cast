@@ -52,6 +52,7 @@ function fixture({ wrongVid = false, fallback = 'https://vod.snssdk.com/info', m
   const context = { Buffer, URL, URLSearchParams, AbortSignal, signedDeviceIds, module: { exports: {} },
     require: name => {
       if (name === 'axios') return axios;
+      if (name === 'jsbi') return require('jsbi');
       if (name === './sm3') return require(path.join(nativeDir, 'sm3'));
       if (name === './download-quality') return require(path.join(nativeDir, 'download-quality'));
       if (name === 'node:crypto') return { ...crypto, createHash(name, ...args) {
