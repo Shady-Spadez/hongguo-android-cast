@@ -4,7 +4,11 @@ module.exports = function sm3(input) {
   const data = Buffer.alloc(Math.ceil((source.length + 9) / 64) * 64);
   source.copy(data);
   data[source.length] = 0x80;
-  data.writeBigUInt64BE(BigInt(source.length) * 8n, data.length - 8);
+  // Bit length written as two big-endian u32 halves; Buffer's BigInt writers are
+  // unavailable on Chromium 66 WebView (no BigInt global).
+  const bitLength = source.length * 8;
+  data.writeUInt32BE(Math.floor(bitLength / 4294967296), data.length - 8);
+  data.writeUInt32BE(bitLength >>> 0, data.length - 4);
   const state = new Uint32Array([0x7380166f, 0x4914b2b9, 0x172442d7, 0xda8a0600, 0xa96f30bc, 0x163138aa, 0xe38dee4d, 0xb0fb0e4e]);
   const words = new Uint32Array(68);
   const rotate = (x, n) => ((x << (n & 31)) | (x >>> ((32 - n) & 31))) >>> 0;

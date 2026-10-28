@@ -6,9 +6,12 @@
 // bounded HTTPS transport; exact episode matching; supported codec selection.
 // Crypto tables and SDK protocol constants below are not user credentials.
 const crypto = require('node:crypto');
+const JSBI = require('jsbi');
 const sm3 = require('./sm3');
 const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-quality');
-const localId = () => String(1000000000000000n + BigInt('0x' + crypto.randomBytes(6).toString('hex')));
+// 16-digit synthetic ID stays below Number.MAX_SAFE_INTEGER (1e15 + 2^48 - 1 < 2^53),
+// so plain numbers replace BigInt for Chromium 66 WebView compatibility.
+const localId = () => String(1000000000000000 + parseInt(crypto.randomBytes(6).toString('hex'), 16));
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
 const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
@@ -37,19 +40,25 @@ function md5(value) { return crypto.createHash('md5').update(value).digest('hex'
 function u32(value) { return Number(value) >>> 0; }
 function rol32(value, count) { const n = count & 31; const x = u32(value); return u32((x << n) | (x >>> (32 - n))); }
 function ror32(value, count) { const n = count & 31; const x = u32(value); return u32((x >>> n) | (x << (32 - n))); }
-function ror64(value, count) { const n = BigInt(count) & 63n; const x = BigInt.asUintN(64, BigInt(value)); return BigInt.asUintN(64, (x >> n) | (x << (64n - n))); }
+// 64-bit helpers use JSBI instead of BigInt operators: Chromium 66 WebView has no
+// BigInt, and operator transpilation is impossible, so shared desktop/Android code
+// calls JSBI methods directly (desktop keeps working, Android 66 gains support).
+const u64 = (value) => JSBI.asUintN(64, value);
+const readU64LE = (buf, at) => u64(JSBI.add(JSBI.BigInt(buf.readUInt32LE(at)), JSBI.leftShift(JSBI.BigInt(buf.readUInt32LE(at + 4)), JSBI.BigInt(32))));
+const writeU64LE = (buf, at, value) => { const v = u64(value); buf.writeUInt32LE(Number(JSBI.bitwiseAnd(v, JSBI.BigInt(0xffffffff))), at); buf.writeUInt32LE(Number(JSBI.signedRightShift(v, JSBI.BigInt(32))) & 0xffffffff, at + 4); };
+function ror64(value, count) { const n = JSBI.bitwiseAnd(JSBI.BigInt(count), JSBI.BigInt(63)); const x = u64(JSBI.BigInt(value)); return u64(JSBI.bitwiseOr(JSBI.signedRightShift(x, n), JSBI.leftShift(x, JSBI.subtract(JSBI.BigInt(64), n)))); }
 function le32(value) { const b = Buffer.alloc(4); b.writeUInt32LE(u32(value)); return b; }
 function be32(value) { const b = Buffer.alloc(4); b.writeUInt32BE(u32(value)); return b; }
-function zigzag(value) { const n = BigInt(value); return n < 0n ? ((-n) * 2n - 1n) : n * 2n; }
-function varint(value) { let n = BigInt(value); const out = []; while (n > 127n) { out.push(Number((n & 127n) | 128n)); n >>= 7n; } out.push(Number(n)); return Buffer.from(out); }
+function zigzag(value) { const n = JSBI.BigInt(value); return JSBI.lessThan(n, JSBI.BigInt(0)) ? JSBI.subtract(JSBI.multiply(JSBI.subtract(JSBI.BigInt(0), n), JSBI.BigInt(2)), JSBI.BigInt(1)) : JSBI.multiply(n, JSBI.BigInt(2)); }
+function varint(value) { let n = JSBI.BigInt(value); const out = []; while (JSBI.greaterThan(n, JSBI.BigInt(127))) { out.push(JSBI.toNumber(JSBI.bitwiseOr(JSBI.bitwiseAnd(n, JSBI.BigInt(127)), JSBI.BigInt(128)))); n = JSBI.signedRightShift(n, JSBI.BigInt(7)); } out.push(JSBI.toNumber(n)); return Buffer.from(out); }
 function protoField(tag, value, type = 'string') {
     if (value === undefined || value === null || value === '') return Buffer.alloc(0);
     if (type === 'bytes' || type === 'string' || type === 'message') {
         const body = type === 'bytes' ? Buffer.from(value) : type === 'message' ? value : Buffer.from(String(value));
-        return Buffer.concat([varint((BigInt(tag) << 3n) | 2n), varint(body.length), body]);
+        return Buffer.concat([varint(JSBI.bitwiseOr(JSBI.leftShift(JSBI.BigInt(tag), JSBI.BigInt(3)), JSBI.BigInt(2))), varint(body.length), body]);
     }
-    if (type === 'float') { const body = Buffer.alloc(4); body.writeFloatLE(Number(value)); return Buffer.concat([varint((BigInt(tag) << 3n) | 5n), body]); }
-    return Buffer.concat([varint(BigInt(tag) << 3n), varint(type === 'sint' ? zigzag(value) : value)]);
+    if (type === 'float') { const body = Buffer.alloc(4); body.writeFloatLE(Number(value)); return Buffer.concat([varint(JSBI.bitwiseOr(JSBI.leftShift(JSBI.BigInt(tag), JSBI.BigInt(3)), JSBI.BigInt(5))), body]); }
+    return Buffer.concat([varint(JSBI.leftShift(JSBI.BigInt(tag), JSBI.BigInt(3))), varint(type === 'sint' ? zigzag(value) : value)]);
 }
 function proto(fields) { return Buffer.concat(fields.map(([tag, value, type]) => protoField(tag, value, type))); }
 function getIv(iv, data) { let value = u32(iv); for (let i = 0; i < data.length; i += 1) { if ((i & 1) === 0) value = u32((value >>> 4) ^ value ^ (value << 6) ^ data[i]); else value = u32(~((value >>> 7) ^ value ^ (data[i] | (value << 12)))); } return value; }
@@ -116,10 +125,10 @@ function buildMedusa(url, body, khronos, device) {
 }
 function helios(khronos) {
     const random = Math.floor(Math.random() * 0x100000000); const data = Buffer.concat([le32(random), Buffer.from('8662')]); const digest = crypto.createHash('md5').update(data).digest(); const ascii = Buffer.from(digest.toString('hex'), 'ascii'); const words = [];
-    for (let i = 0; i < 4; i += 1) words.push(ascii.readBigUInt64LE(i * 8)); const table = [words[0]]; let b0 = words[0]; let b8 = words[1]; words.splice(0, 2);
-    for (let i = 0; i < 34; i += 1) { let x8 = BigInt.asUintN(64, ror64(b8, 8) + b0); x8 = BigInt.asUintN(64, x8 ^ BigInt(i)); words.push(x8); x8 = BigInt.asUintN(64, x8 ^ ror64(b0, 61)); table.push(x8); b0 = x8; b8 = words.shift(); }
+    for (let i = 0; i < 4; i += 1) words.push(readU64LE(ascii, i * 8)); const table = [words[0]]; let b0 = words[0]; let b8 = words[1]; words.splice(0, 2);
+    for (let i = 0; i < 34; i += 1) { let x8 = u64(JSBI.add(ror64(b8, 8), b0)); x8 = u64(JSBI.bitwiseXor(x8, JSBI.BigInt(i))); words.push(x8); x8 = u64(JSBI.bitwiseXor(x8, ror64(b0, 61))); table.push(x8); b0 = x8; b8 = words.shift(); }
     const text = Buffer.from(`${khronos}-1588093228-8662`); const pad = Buffer.alloc(Math.ceil((text.length + 1) / 16) * 16, 16 - (text.length % 16)); text.copy(pad); const output = [];
-    for (let at = 0; at < pad.length; at += 16) { let a = pad.readBigUInt64LE(at); let b = pad.readBigUInt64LE(at + 8); for (let i = 0; i < 34; i += 1) { b = BigInt.asUintN(64, table[i] ^ (a + ror64(b, 8))); a = BigInt.asUintN(64, b ^ ror64(a, 61)); } const block = Buffer.alloc(16); block.writeBigUInt64LE(a); block.writeBigUInt64LE(b, 8); output.push(block); }
+    for (let at = 0; at < pad.length; at += 16) { let a = readU64LE(pad, at); let b = readU64LE(pad, at + 8); for (let i = 0; i < 34; i += 1) { b = u64(JSBI.bitwiseXor(table[i], JSBI.add(a, ror64(b, 8)))); a = u64(JSBI.bitwiseXor(b, ror64(a, 61))); } const block = Buffer.alloc(16); writeU64LE(block, 0, a); writeU64LE(block, 8, b); output.push(block); }
     return Buffer.concat([le32(random), ...output]).toString('base64');
 }
 
