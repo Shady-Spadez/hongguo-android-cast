@@ -29,7 +29,7 @@ public final class PlayerActivity extends Activity {
     private Future<?> resolution;
     private final ExecutorService cacheWorker = Executors.newFixedThreadPool(2);
     private final Set<String> caching = ConcurrentHashMap.newKeySet();
-    private VideoView video;
+    private TextureVideoView video;
     private FrameLayout playerRoot;
     private MediaPlayer mediaPlayer;
     private String quality = "auto", actualQuality = "auto", protectedQuality = "auto";
@@ -177,7 +177,7 @@ public final class PlayerActivity extends Activity {
     private TextView label(int size) { TextView v = new TextView(this); v.setTextColor(0xffffffff); v.setTextSize(size); return v; }
     private void buildViews() {
         FrameLayout root = new FrameLayout(this); playerRoot = root; root.setBackgroundColor(0xff000000);
-        video = new VideoView(this); video.setFocusable(true); video.setFocusableInTouchMode(true);
+        video = new TextureVideoView(this); video.setFocusable(true); video.setFocusableInTouchMode(true);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         installVideoTouch(video);
         danmakuOverlay = new DanmakuOverlay(this, new DanmakuOverlay.Clock() {
@@ -325,7 +325,7 @@ public final class PlayerActivity extends Activity {
         super.onConfigurationChanged(configuration);
         if (!BuildConfig.IS_TV && playerRoot != null) { applyPhoneLayout(); playerRoot.requestApplyInsets(); }
     }
-    private void installVideoTouch(VideoView view) {
+    private void installVideoTouch(TextureVideoView view) {
         // Consume the reveal tap so it never also pauses/seeks or activates a newly shown button.
         view.setOnTouchListener((target, event) -> true);
     }
@@ -373,7 +373,7 @@ public final class PlayerActivity extends Activity {
         lastProgressSavedAt = SystemClock.elapsedRealtime();
     }
     private void saveProgress() {
-        if (casting()) return; // The service persists the TV position, never the stopped local VideoView.
+        if (casting()) return; // The service persists the TV position, never the stopped local TextureVideoView.
         if (prepared && episode != null && video != null) try {
             resumeAt = completed ? 0 : Math.max(0, video.getCurrentPosition()); recordProgress(owner(episode), episode, resumeAt);
         } catch (RuntimeException transition) { /* A decoder transition is retried at the next checkpoint. */ }
@@ -383,7 +383,7 @@ public final class PlayerActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (now < lastProgressSavedAt || now - lastProgressSavedAt >= 15000) saveProgress();
     }
-    private void watchProgressSeeks(MediaPlayer player, int token, VideoView targetView) {
+    private void watchProgressSeeks(MediaPlayer player, int token, TextureVideoView targetView) {
         player.setOnSeekCompleteListener(mp -> {
             if (destroyed || token != generation || video != targetView || mediaPlayer != mp || !prepared || casting()) return;
             saveProgress();
@@ -525,10 +525,10 @@ public final class PlayerActivity extends Activity {
         if (playbackPrepareTimeout != null) { main.removeCallbacks(playbackPrepareTimeout); playbackPrepareTimeout = null; }
         if (bufferingTimeout != null) { main.removeCallbacks(bufferingTimeout); bufferingTimeout = null; }
     }
-    private boolean validPlaybackCallback(int token, VideoView view) {
+    private boolean validPlaybackCallback(int token, TextureVideoView view) {
         return !destroyed && token == generation && view == video && !casting() && !castWasActive;
     }
-    private void armPreparationTimeout(int token, VideoView view) {
+    private void armPreparationTimeout(int token, TextureVideoView view) {
         if (playbackPrepareTimeout != null) main.removeCallbacks(playbackPrepareTimeout);
         decoderPreparing = true;
         final Runnable[] captured = new Runnable[1];
@@ -540,7 +540,7 @@ public final class PlayerActivity extends Activity {
         };
         main.postDelayed(playbackPrepareTimeout, 20000);
     }
-    private void updateBufferingWatchdog(int token, VideoView view) {
+    private void updateBufferingWatchdog(int token, TextureVideoView view) {
         boolean needed = validPlaybackCallback(token, view) && active && prepared && !completed && !userPaused && buffering && qualitySwitch == null;
         if (!needed) { if (bufferingTimeout != null) { main.removeCallbacks(bufferingTimeout); bufferingTimeout = null; } return; }
         if (bufferingTimeout != null) return;
@@ -609,7 +609,7 @@ public final class PlayerActivity extends Activity {
                     adoptMedia(media);
                     currentKind = media.kind; currentManual = media.manual; currentCache = media.cached; currentWeb = media.remote != null;
                     sourceShortEdge = media.plan != null && media.plan.width > 0 && media.plan.height > 0 ? Math.min(media.plan.width, media.plan.height) : 0; renderStatus();
-                    VideoView targetView = video;
+                    TextureVideoView targetView = video;
                     bindPlayback(targetView, token, target, media.remote, playedQuality);
                     targetView.setOnPreparedListener(player -> {
                         if (destroyed || token != generation || video != targetView) return;
@@ -639,7 +639,7 @@ public final class PlayerActivity extends Activity {
             } catch (Exception error) { main.post(() -> playbackError(token, recovering ? "自动恢复未成功：" + error.getMessage() + "；原错误：" + lastMediaError : error.getMessage())); }
         });
     }
-    private void bindPlayback(VideoView view, int token, JSONObject target, String remoteUrl, String targetQuality) {
+    private void bindPlayback(TextureVideoView view, int token, JSONObject target, String remoteUrl, String targetQuality) {
         final JSONObject targetSeries = owner(target);
         buffering = false;
         view.setOnInfoListener((player, what, extra) -> {
@@ -723,7 +723,7 @@ public final class PlayerActivity extends Activity {
     }
     private static final class QualitySwitch {
         final int generation, serial; int ceiling, observedShortEdge; final String quality; final JSONObject episode; final PlaybackCache.QueueWindow window;
-        Future<?> work; VideoView view; MediaPlayer player; Runnable timeout; PreparedMedia media;
+        Future<?> work; TextureVideoView view; MediaPlayer player; Runnable timeout; PreparedMedia media;
         QualitySwitch(int generation, int serial, String quality, JSONObject episode, PlaybackCache.QueueWindow window) { this.generation = generation; this.serial = serial; this.quality = quality; this.episode = episode; this.window = window; }
     }
     private boolean validSwitch(QualitySwitch job) { return !destroyed && qualitySwitch == job && job.generation == generation && job.serial == qualitySerial; }
@@ -779,7 +779,7 @@ public final class PlayerActivity extends Activity {
         if (!validSwitch(job)) return;
         // The current decoder stays above the candidate until prepare/seek/rate all succeed.
         final PreparedMedia stageMedia = job.media;
-        VideoView candidate = new VideoView(this); job.view = candidate; candidate.setFocusable(true); candidate.setFocusableInTouchMode(true); installVideoTouch(candidate);
+        TextureVideoView candidate = new TextureVideoView(this); job.view = candidate; candidate.setFocusable(true); candidate.setFocusableInTouchMode(true); installVideoTouch(candidate);
         playerRoot.addView(candidate, 0, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         job.timeout = () -> { if (!validCandidate(job, candidate, stageMedia)) return; if (!lowerQualitySwitch(job, "设备准备或定位超时")) failQualitySwitch(job, "设备准备或定位超时"); }; main.postDelayed(job.timeout, 20000);
         candidate.setOnErrorListener((mp, what, extra) -> { if (!validCandidate(job, candidate, stageMedia)) return true; String reason = "设备解码暂不可用（" + what + "/" + extra + "）"; if (!lowerQualitySwitch(job, reason)) failQualitySwitch(job, reason); return true; });
@@ -808,7 +808,7 @@ public final class PlayerActivity extends Activity {
         headers.put("Referer", job.media.plan == null ? NetworkGuard.REFERER : job.media.plan.referer);
         candidate.setVideoURI(uri, headers);
     }
-    private boolean validCandidate(QualitySwitch job, VideoView candidate, PreparedMedia stageMedia) {
+    private boolean validCandidate(QualitySwitch job, TextureVideoView candidate, PreparedMedia stageMedia) {
         return validSwitch(job) && job.view == candidate && job.media == stageMedia;
     }
     private boolean lowerQualitySwitch(QualitySwitch job, String reason) {
@@ -823,7 +823,7 @@ public final class PlayerActivity extends Activity {
         if (job.timeout != null) main.removeCallbacks(job.timeout);
         if (job.player != null) job.player.setOnSeekCompleteListener(null);
         if (job.view != null && job.view != video) {
-            VideoView rejected = job.view; job.view = null; rejected.setOnErrorListener(null); rejected.setOnPreparedListener(null);
+            TextureVideoView rejected = job.view; job.view = null; rejected.setOnErrorListener(null); rejected.setOnPreparedListener(null);
             rejected.stopPlayback(); playerRoot.removeView(rejected);
         }
         releasePrepared(job.media); job.media = null; job.player = null;
@@ -837,14 +837,14 @@ public final class PlayerActivity extends Activity {
             float accepted = Float.isFinite(actualSpeed) ? PlayerOptions.setVerifiedSpeed(job.player, actualSpeed, shouldPlay) : PlayerOptions.observedSpeed(job.player);
             if (shouldPlay) job.view.start(); else job.view.pause();
             PlayerOptions.update(this, new JSONObject().put("quality", job.quality));
-            VideoView old = video; old.stopPlayback(); adoptMedia(job.media); playerRoot.removeView(old);
+            TextureVideoView old = video; old.stopPlayback(); adoptMedia(job.media); playerRoot.removeView(old);
             video = job.view; mediaPlayer = job.player; quality = job.quality;
             mediaPlayer.setVolume(1f, 1f);
             qualitySwitch = null; if (job.timeout != null) main.removeCallbacks(job.timeout);
             automaticCeiling = job.media.ceiling;
             actualSpeed = accepted; if (Float.isFinite(accepted)) requestedSpeed = accepted; videoWidth = mediaPlayer.getVideoWidth(); videoHeight = mediaPlayer.getVideoHeight();
             bindPlayback(video, generation, episode, job.media.remote, actualQuality);
-            final VideoView currentView = video; final int token = generation;
+            final TextureVideoView currentView = video; final int token = generation;
             watchProgressSeeks(mediaPlayer, token, currentView);
             mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
             currentManual = false; currentCache = job.media.cached; currentWeb = job.media.remote != null;
