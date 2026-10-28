@@ -14,7 +14,14 @@ final class PlaybackCache {
     private static PlaybackCache instance;
     private final PlaybackCachePolicy policy;
     private PlaybackCache(Context context) {
-        policy = new PlaybackCachePolicy(new File(context.getApplicationContext().getCacheDir(), "playback-v2"), BUDGET_BYTES, MAX_FILE_BYTES, CAST_BUDGET_BYTES, PlaybackSources::download);
+        // The hi3751 MediaPlayer opens media files inside the mediaserver process,
+        // which cannot read app-internal /data/data paths (0700, app uid): every
+        // staged episode failed instantly with error (1,0). External app storage
+        // (/sdcard/Android/data) is readable there — manual downloads from the same
+        // tree played fine — so the playback cache must live there too.
+        File external = context.getApplicationContext().getExternalFilesDir(null);
+        File cacheRoot = external != null ? new File(external, "playback-v2") : new File(context.getApplicationContext().getCacheDir(), "playback-v2");
+        policy = new PlaybackCachePolicy(cacheRoot, BUDGET_BYTES, MAX_FILE_BYTES, CAST_BUDGET_BYTES, PlaybackSources::download);
     }
     static synchronized PlaybackCache get(Context context) {
         if (instance == null) instance = new PlaybackCache(context);
