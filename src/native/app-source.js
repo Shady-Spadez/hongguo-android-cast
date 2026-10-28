@@ -45,7 +45,7 @@ function ror32(value, count) { const n = count & 31; const x = u32(value); retur
 // calls JSBI methods directly (desktop keeps working, Android 66 gains support).
 const u64 = (value) => JSBI.asUintN(64, value);
 const readU64LE = (buf, at) => u64(JSBI.add(JSBI.BigInt(buf.readUInt32LE(at)), JSBI.leftShift(JSBI.BigInt(buf.readUInt32LE(at + 4)), JSBI.BigInt(32))));
-const writeU64LE = (buf, at, value) => { const v = u64(value); buf.writeUInt32LE(Number(JSBI.bitwiseAnd(v, JSBI.BigInt(0xffffffff))), at); buf.writeUInt32LE(Number(JSBI.signedRightShift(v, JSBI.BigInt(32))) & 0xffffffff, at + 4); };
+const writeU64LE = (buf, at, value) => { const v = u64(value); buf.writeUInt32LE(JSBI.toNumber(JSBI.bitwiseAnd(v, JSBI.BigInt(0xffffffff))), at); buf.writeUInt32LE(JSBI.toNumber(JSBI.signedRightShift(v, JSBI.BigInt(32))) & 0xffffffff, at + 4); };
 function ror64(value, count) { const n = JSBI.bitwiseAnd(JSBI.BigInt(count), JSBI.BigInt(63)); const x = u64(JSBI.BigInt(value)); return u64(JSBI.bitwiseOr(JSBI.signedRightShift(x, n), JSBI.leftShift(x, JSBI.subtract(JSBI.BigInt(64), n)))); }
 function le32(value) { const b = Buffer.alloc(4); b.writeUInt32LE(u32(value)); return b; }
 function be32(value) { const b = Buffer.alloc(4); b.writeUInt32BE(u32(value)); return b; }
