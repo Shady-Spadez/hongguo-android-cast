@@ -98,6 +98,7 @@ public final class PlayerActivity extends Activity {
     private volatile int current, generation;
     private int resumeAt;
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
+    private boolean surfaceRecoveryArmed = true;
     private volatile boolean destroyed, autoplay;
     private boolean cleanup, offline;
     private String currentKind = "正在连接片源", lastMediaError;
@@ -145,6 +146,7 @@ public final class PlayerActivity extends Activity {
             current = PlaybackPlaylist.find(queue, series.getString("seriesId"), selected.getString("vid"), selected.getInt("index"), queueSeries);
             if (current < 0) throw new Exception("分集不在队列中");
             autoplay = state == null ? getIntent().getBooleanExtra("autoplay", true) : state.getBoolean("autoplay", true);
+            surfaceRecoveryArmed = state == null || state.getBoolean("surfaceRecoveryArmed", true);
             cleanup = getIntent().getBooleanExtra("cleanupPlaybackCache", true);
             offline = getIntent().getBooleanExtra("download", false);
             JSONObject defaults = PlayerOptions.read(this);
@@ -409,7 +411,7 @@ public final class PlayerActivity extends Activity {
         return restored;
     }
     private void savePlaybackState(Bundle state) {
-        saveProgress(); state.putInt("position", resumeAt); state.putBoolean("autoplay", autoplay);
+        saveProgress(); state.putInt("position", resumeAt); state.putBoolean("autoplay", autoplay); state.putBoolean("surfaceRecoveryArmed", surfaceRecoveryArmed);
         state.putString("quality", quality); state.putString("actualQuality", actualQuality); state.putInt("automaticCeiling", automaticCeiling); state.putDouble("speed", requestedSpeed); state.putBoolean("userPaused", userPaused);
         if (episode != null) { state.putString("vid", episode.optString("vid")); state.putString("seriesId", owner(episode).optString("seriesId")); state.putInt("episodeIndex", episode.optInt("index")); }
     }
@@ -570,6 +572,7 @@ public final class PlayerActivity extends Activity {
     }
     private void loadAt(int position, String initialUrl, int startAt) { loadAt(position, initialUrl, startAt, false); }
     private void loadAt(int position, String initialUrl, int startAt, boolean remainPaused) {
+        surfaceRecoveryArmed = true; // A user or auto-advance selection means playback was healthy.
         if (castCommand("select", position)) return;
         loadAtInternal(position, initialUrl, startAt, remainPaused, false, false);
     }
@@ -875,6 +878,17 @@ public final class PlayerActivity extends Activity {
     }
     private void playbackError(int token, String message) {
         if (destroyed || token != generation || isFinishing()) return;
+        if (surfaceRecoveryArmed) {
+            // hi3751: after many back-to-back episodes the reused surface loses its
+            // hi-player video-output handle and every subsequent MediaPlayer start fails
+            // with error (1,0); rebuilding the activity surface once restores playback.
+            surfaceRecoveryArmed = false;
+            try { if (prepared) resumeAt = Math.max(0, video.getCurrentPosition()); } catch (RuntimeException ignored) { }
+            cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false;
+            status.setText("设备解码通道异常 · 正在自动恢复播放"); updateButtons(); showControls();
+            main.postDelayed(() -> { if (!destroyed && !isFinishing()) recreate(); }, 700);
+            return;
+        }
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false;
         prepared = false; video.stopPlayback(); status.setText(message == null ? "本集片源暂不可用" : message); updateButtons(); showControls();
         showPlayerDialog(new AlertDialog.Builder(this).setTitle("第 " + episode.optInt("index") + " 集暂未播放")
