@@ -22,11 +22,12 @@ await build({
 });
 
 // Fail the build if any raw BigInt usage survived into the generated bundle.
-// JSBI code legitimately contains `JSBI.BigInt(`, so only flag a BigInt
-// reference that is NOT reached through the JSBI namespace.
+// JSBI code legitimately contains `JSBI.BigInt(` calls and a `static BigInt(`
+// class-method definition, so only flag references outside the JSBI namespace.
+// BigInt literals need no check: esbuild itself rejects them at target chrome66.
 const fs = await import('node:fs');
 const generated = fs.readFileSync(output, 'utf8');
-const offenders = generated.match(/typeof BigInt\b|(?<![.\w])BigInt\s*\(/g);
+const offenders = generated.match(/typeof BigInt\b|(?<![.\w])(?<!static\s)BigInt\s*\(/g);
 if (offenders) {
   console.error('ANDROID_MAC_SOURCE_BIGINT_REMAINS', offenders.slice(0, 5));
   process.exit(1);
