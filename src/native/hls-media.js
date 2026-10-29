@@ -105,8 +105,11 @@ async function remuxHls({ url, output, ffmpeg, signal, cancelToken, request = re
     const input = await stage(url,true);
     check();
     await new Promise((resolve,reject) => {
+      // The CDN stamps an inflated level_idc (L186) on streams a level-4 decoder must
+      // otherwise handle; rewrite every HEVC level declaration down to L120 during the
+      // copy so capability checks pass and the hardware decoder emits frames.
       child = spawn(ffmpeg,['-v','error','-nostdin','-y','-protocol_whitelist','file,crypto','-allowed_extensions','ALL',
-        '-i',input,'-map','0:v:0','-map','0:a?','-c','copy','-movflags','+faststart','-f','mp4',output],
+        '-i',input,'-map','0:v:0','-map','0:a?','-c','copy','-bsf:v','hevc_metadata=level=120','-movflags','+faststart','-f','mp4',output],
       {windowsHide:true,stdio:['ignore','ignore','pipe']});
       child.stderr.on('data',() => {});
       child.once('error',() => reject(new Error('无法启动 FFmpeg')));
