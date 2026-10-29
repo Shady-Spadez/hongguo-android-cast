@@ -141,6 +141,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if (source == null || !surfaceReady) return;
         Surface surface = getHolder().getSurface();
         if (surface == null || !surface.isValid()) return;
+        if ("file".equals(source.getScheme())) patchHevcLevelClaim(source.getPath());
         ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
         fresh.setMediaItem(MediaItem.fromUri(source));
@@ -195,6 +196,41 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     private void notifyInfo(int what) {
         OnInfoListener listener = onInfoListener;
         if (listener != null) listener.onInfo(this, what, 0);
+    }
+
+    /**
+     * The CDN's HEVC encodes carry an inflated general_level_idc (observed L186 = level 6.2
+     * on 1080p30 content that only needs level 4), and this box's decoder refuses to init —
+     * or inits but never emits frames — for claims beyond its declared maximum, so MediaCodec
+     * logs NoSupport and every surface stays blank. The staged file's actual content is well
+     * within Main@L120 capability, so rewrite the hvcC level byte down to 120 before playback;
+     * decoders treat level_idc as advisory once the profile matches.
+     */
+    private static void patchHevcLevelClaim(String path) {
+        if (path == null) return;
+        java.io.RandomAccessFile file = null;
+        try {
+            file = new java.io.RandomAccessFile(path, "rw");
+            int window = 512 * 1024;
+            long length = file.length();
+            byte[] buffer = new byte[(int) Math.min(window, length)];
+            file.readFully(buffer);
+            for (int i = 0; i + 20 <= buffer.length; i++) {
+                if (buffer[i] != 'h' || buffer[i + 1] != 'v' || buffer[i + 2] != 'c' || buffer[i + 3] != 'C') continue;
+                if (buffer[i + 4] != 1) continue; // configurationVersion
+                int levelOffset = i + 4 + 12; // general_level_idc within hvcC payload
+                int level = buffer[levelOffset] & 0xff;
+                if (level > 123) {
+                    buffer[levelOffset] = (byte) 120;
+                    file.seek(levelOffset);
+                    file.write(buffer[levelOffset]);
+                }
+                return;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (file != null) try { file.close(); } catch (Exception ignored) { }
+        }
     }
 
     private void notifyError(int what, int extra) {
