@@ -7,13 +7,12 @@ import android.net.Uri;
 import android.view.Surface;
 import android.view.TextureView;
 
-import com.google.android.exoplayer2.ExoPlayer;
-import com.google.android.exoplayer2.MediaItem;
-import com.google.android.exoplayer2.PlaybackException;
-import com.google.android.exoplayer2.PlaybackParameters;
-import com.google.android.exoplayer2.Player;
-import com.google.android.exoplayer2.SimpleExoPlayer;
-import com.google.android.exoplayer2.video.VideoSize;
+import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.Player;
+import androidx.media3.common.VideoSize;
+import androidx.media3.exoplayer.ExoPlayer;
 
 import java.util.Map;
 
@@ -40,7 +39,7 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
     interface OnSeekCompleteListener { void onSeekComplete(TextureVideoView view); }
     interface OnVideoSizeChangedListener { void onVideoSizeChanged(TextureVideoView view, int width, int height); }
 
-    private SimpleExoPlayer player;
+    private ExoPlayer player;
     private Uri source;
     private Map<String, String> headers;
     private Surface surface;
@@ -147,7 +146,7 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
     private void open() {
         release();
         if (source == null || !surfaceReady) return;
-        SimpleExoPlayer fresh = new SimpleExoPlayer.Builder(getContext()).build();
+        ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
         fresh.setMediaItem(MediaItem.fromUri(source));
         fresh.addListener(new Player.Listener() {

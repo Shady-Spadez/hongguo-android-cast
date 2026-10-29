@@ -64,7 +64,9 @@ android {
 
 dependencies {
     // The vendor MediaPlayer on hi3751 cannot render into regular buffer queues
-    // (sideband video output only), so video playback goes through ExoPlayer's
-    // standard MediaCodec pipeline instead.
-    implementation 'com.google.android.exoplayer:exoplayer-core:2.19.1'
+    // (sideband video output only), so video playback goes through Media3/ExoPlayer's
+    // standard MediaCodec pipeline instead. Media3 (not exoplayer 2.x): its bundled
+    // Guava is jarjar-renamed, so the ancient Guava on this ROM's boot classpath
+    // (/system/framework/libsetting.jar) cannot shadow it at runtime.
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
 }
