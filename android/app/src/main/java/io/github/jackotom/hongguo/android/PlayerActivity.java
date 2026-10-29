@@ -188,9 +188,9 @@ public final class PlayerActivity extends Activity {
         });
         root.addView(danmakuOverlay, new FrameLayout.LayoutParams(-1, -1));
         // Faint wall clock for immersive viewing; visibility flips with the HUD below.
-        clockView = label(13); clockView.setTextColor(0x59ffffff);
+        clockView = label(17); clockView.setTextColor(0x8cffffff); clockView.setShadowLayer(2, 1, 1, 0x99000000);
         FrameLayout.LayoutParams clockLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-        clockLayout.topMargin = dp(6); clockLayout.rightMargin = dp(12);
+        clockLayout.topMargin = dp(8); clockLayout.rightMargin = dp(16);
         clockView.setVisibility(View.GONE);
         root.addView(clockView, clockLayout);
         danmaku = new DanmakuController(this, main, danmakuOverlay, value -> { danmakuNotice = value; updateDanmakuButton(); });
