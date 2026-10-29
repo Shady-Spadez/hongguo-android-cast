@@ -39,8 +39,8 @@ const pkg = JSON.parse(read('package.json'));
 check(`release version is ${version}/code ${code}`, () => {
   assert(/^\d+\.\d+\.\d+$/.test(version) && Number(code) > 0, 'valid Android release version required');
 });
-check('release explicitly disables debuggability and shrinking', () => {
-  assert(/release\s*\{[^}]*debuggable\s+false[^}]*minifyEnabled\s+false/s.test(gradle), 'release must explicitly use debuggable false and minifyEnabled false');
+check('release explicitly disables debuggability and keeps R8 renaming for the boot-classpath Guava workaround', () => {
+  assert(/release\s*\{[^}]*debuggable\s+false[^}]*minifyEnabled\s+true/s.test(gradle), 'release must explicitly use debuggable false and minifyEnabled true (R8 renames the bundled Guava away from the boot-classpath copy)');
 });
 check('release signing is explicit; external credentials come from environment', () => {
   assert(gradle.includes("gradleProperty('hongguoReleaseSigning')") && gradle.includes("orElse('none')"), 'unsigned default is missing');
