@@ -55,7 +55,10 @@ android {
     buildTypes {
         release {
             debuggable false
-            minifyEnabled false
+            // Required to rename the bundled Guava away from the boot-classpath
+            // copy shipped in this ROM's libsetting.jar; see proguard-rules.pro.
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (releaseSigning == 'compatible') signingConfig signingConfigs.releaseCompatible
             if (releaseSigning == 'external') signingConfig signingConfigs.releaseExternal
         }
