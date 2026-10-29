@@ -225,7 +225,23 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                     file.seek(levelOffset);
                     file.write(buffer[levelOffset]);
                 }
-                return;
+                break;
+            }
+            // The SPS NAL inside the hvcC arrays (and any in-band copy) repeats the
+            // level inside its profile_tier_level — with this encoder the zero run
+            // carries three emulation-prevention triples, so the level byte sits
+            // right after the fixed 00 00 03 00 00 03 00 00 03 00 tail. Media3
+            // derives its codec string from there, so patch it too.
+            for (int i = 0; i + 10 < buffer.length; i++) {
+                if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 3) continue;
+                if (buffer[i + 3] != 0 || buffer[i + 4] != 0 || buffer[i + 5] != 3) continue;
+                if (buffer[i + 6] != 0 || buffer[i + 7] != 0 || buffer[i + 8] != 3 || buffer[i + 9] != 0) continue;
+                int level = buffer[i + 10] & 0xff;
+                if (level > 123) {
+                    buffer[i + 10] = (byte) 120;
+                    file.seek(i + 10);
+                    file.write(buffer[i + 10]);
+                }
             }
         } catch (Exception ignored) {
         } finally {
