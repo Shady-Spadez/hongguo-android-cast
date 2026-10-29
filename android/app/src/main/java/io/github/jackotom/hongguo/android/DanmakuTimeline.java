@@ -17,7 +17,7 @@ final class DanmakuTimeline {
     private final Set<String> emitted=new HashSet<>();
     private int cursor;
     private long last=-1;
-    static float velocity(float width){return Math.max(.10f,width/8000f);}
+    static float velocity(float width){return Math.max(.10f,width/15000f);}
     void clear(){items=Collections.emptyList();active.clear();emitted.clear();cursor=0;last=-1;}
     void replace(List<DanmakuClient.Item> input,long position){items=new ArrayList<>(input);items.sort(Comparator.comparingLong(x->x.timeMs));cursor=lowerBound(Math.max(0,position-750));if(emitted.size()>3000)emitted.clear();}
     private int lowerBound(long position){int low=0,high=items.size();while(low<high){int middle=(low+high)>>>1;if(items.get(middle).timeMs<position)low=middle+1;else high=middle;}return low;}

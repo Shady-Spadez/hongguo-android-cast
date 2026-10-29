@@ -21,7 +21,7 @@ final class DanmakuOverlay extends View {
     void pulse(){if(enabled)invalidate();}
     void seek(long position){timeline.seek(position);invalidate();}
     @Override protected void onDraw(Canvas canvas){super.onDraw(canvas);if(!enabled)return;long position;boolean playing;try{position=clock.position();playing=clock.playing();}catch(RuntimeException notReady){return;}
-        float size=paint.getTextSize(),top=Math.max(size*2,getHeight()*.13f),step=size*1.5f;
+        float size=paint.getTextSize(),top=Math.max(size*1.3f,getHeight()*.05f),step=size*1.5f;
         for(DanmakuTimeline.Visible item:timeline.advance(position,playing,getWidth(),paint::measureText)){paint.setColor(item.item.color);paint.setAlpha(220);canvas.drawText(item.item.text,item.x(position,getWidth()),top+item.lane*step,paint);}
         if(playing&&getWindowVisibility()==View.VISIBLE)postInvalidateDelayed(33);
     }

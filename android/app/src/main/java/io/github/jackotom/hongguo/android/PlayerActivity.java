@@ -38,6 +38,7 @@ public final class PlayerActivity extends Activity {
     private int videoWidth, videoHeight, qualitySerial;
     private volatile QualitySwitch qualitySwitch;
     private TextView title, status, time;
+    private TextView clockView; private int clockMinute = -1;
     private LinearLayout top, bottom;
     private LinearLayout phoneContent, phoneActions, phoneOptions, heading;
     private ScrollView phoneScroller;
@@ -98,6 +99,7 @@ public final class PlayerActivity extends Activity {
     private volatile int current, generation;
     private int resumeAt;
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
+    private boolean silentAdvance; // auto-advance keeps the HUD hidden end to end
     private boolean surfaceRecoveryArmed = true;
     private volatile boolean destroyed, autoplay;
     private boolean cleanup, offline;
@@ -185,6 +187,12 @@ public final class PlayerActivity extends Activity {
             public boolean playing() { return active && prepared && !completed && !userPaused && !buffering && !dragging && !casting() && !castWasActive && video != null && video.isPlaying(); }
         });
         root.addView(danmakuOverlay, new FrameLayout.LayoutParams(-1, -1));
+        // Faint wall clock for immersive viewing; visibility flips with the HUD below.
+        clockView = label(13); clockView.setTextColor(0x59ffffff);
+        FrameLayout.LayoutParams clockLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        clockLayout.topMargin = dp(6); clockLayout.rightMargin = dp(12);
+        clockView.setVisibility(View.GONE);
+        root.addView(clockView, clockLayout);
         danmaku = new DanmakuController(this, main, danmakuOverlay, value -> { danmakuNotice = value; updateDanmakuButton(); });
         top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL); top.setPadding(dp(8), dp(8), dp(8), dp(8)); top.setBackgroundColor(0xbb101014);
         back = button("‹ 返回", this::exitPlayer);
@@ -241,6 +249,7 @@ public final class PlayerActivity extends Activity {
         }, visible -> {
             top.setVisibility(visible ? View.VISIBLE : View.GONE);
             bottom.setVisibility(visible ? View.VISIBLE : View.GONE);
+            clockView.setVisibility(visible ? View.GONE : View.VISIBLE);
             if (!visible && video != null) video.requestFocus();
         });
         video.requestFocus(); showControls();
@@ -334,7 +343,7 @@ public final class PlayerActivity extends Activity {
         if (!active || destroyed || isFinishing() || !prepared || completed || userPaused || buffering || dragging || touchingControls || hudDialogs > 0 || qualitySwitch != null || video == null) return false;
         try { return video.isPlaying(); } catch (RuntimeException ignored) { return false; }
     }
-    private void updateControlsState() { if (controlsHud != null) controlsHud.playback(canHideControls()); }
+    private void updateControlsState() { if (controlsHud == null || silentAdvance) return; controlsHud.playback(canHideControls()); }
     private void showControls() {
         if (controlsHud == null) return;
         controlsHud.interact(); updateControlsState();
@@ -583,13 +592,16 @@ public final class PlayerActivity extends Activity {
             showControls();
         });
     }
-    private void loadAt(int position, String initialUrl, int startAt) { loadAt(position, initialUrl, startAt, false); }
-    private void loadAt(int position, String initialUrl, int startAt, boolean remainPaused) {
+    private void loadAt(int position, String initialUrl, int startAt) { loadAt(position, initialUrl, startAt, false, false); }
+    private void loadAt(int position, String initialUrl, int startAt, boolean remainPaused) { loadAt(position, initialUrl, startAt, remainPaused, false); }
+    private void loadAt(int position, String initialUrl, int startAt, boolean remainPaused, boolean silent) {
         surfaceRecoveryArmed = true; // A user or auto-advance selection means playback was healthy.
+        silentAdvance = silent;
         if (castCommand("select", position)) return;
-        loadAtInternal(position, initialUrl, startAt, remainPaused, false, false);
+        loadAtInternal(position, initialUrl, startAt, remainPaused, false, false, silent);
     }
-    private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb) {
+    private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb) { loadAtInternal(position, initialUrl, startAt, remainPaused, recovering, failedWeb, false); }
+    private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb, boolean silent) {
         if (destroyed || position < 0 || position >= queue.size()) return;
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
         current = position; episode = queue.get(current); series = owner(episode); final JSONObject target = episode, targetSeries = series;
@@ -606,7 +618,7 @@ public final class PlayerActivity extends Activity {
         resumeAt = Math.max(0, startAt); lastGoodPosition = resumeAt; prepared = false; completed = false; userPaused = remainPaused;
         actualSpeed = Float.NaN; videoWidth = videoHeight = sourceShortEdge = 0;
         title.setText(series.optString("title") + " · 第 " + target.optInt("index") + " 集");
-        currentKind = "正在连接片源"; status.setText(currentKind); time.setText("00:00 / --:--"); seek.setProgress(0); showControls(); updateButtons();
+        currentKind = "正在连接片源"; status.setText(currentKind); time.setText("00:00 / --:--"); seek.setProgress(0); if (!silent) showControls(); updateButtons();
         pruneCache();
         if (resolution != null) resolution.cancel(true);
         resolution = resolver.submit(() -> {
@@ -632,7 +644,7 @@ public final class PlayerActivity extends Activity {
                                 || media.ceiling > 0 && (videoWidth <= 0 || videoHeight <= 0 || Math.min(videoWidth, videoHeight) > media.ceiling))) {
                             failCurrentMedia(token, "当前片源实际分辨率不符合 " + qualityLabel(playedQuality) + " 播放档位", false); return;
                         }
-                        mediaPlayer = player; prepared = true; completed = false;
+                        mediaPlayer = player; prepared = true; completed = false; silentAdvance = false;
                         watchProgressSeeks(token, targetView);
                         videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
                         player.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
@@ -666,7 +678,7 @@ public final class PlayerActivity extends Activity {
             if (destroyed || token != generation || video != view) return;
             cancelPlaybackWatchdogs(); decoderPreparing = false;
             completed = true; resumeAt = 0; recordProgress(targetSeries, target, 0);
-            if (autoplay && current + 1 < queue.size()) loadAt(current + 1, null, 0);
+            if (autoplay && current + 1 < queue.size()) loadAt(current + 1, null, 0, false, true);
             else { currentKind = current + 1 == queue.size() ? "本剧已播完" : "本集已播完 · 可点击下一集"; renderStatus(); showControls(); updateButtons(); }
         });
         view.setOnErrorListener((player, what, extra) -> {
@@ -892,6 +904,7 @@ public final class PlayerActivity extends Activity {
     }
     private void playbackError(int token, String message) {
         if (destroyed || token != generation || isFinishing()) return;
+        silentAdvance = false;
         if (surfaceRecoveryArmed) {
             // hi3751: after many back-to-back episodes the reused surface loses its
             // hi-player video-output handle and every subsequent MediaPlayer start fails
@@ -995,6 +1008,9 @@ public final class PlayerActivity extends Activity {
     private static String format(int millis) { int seconds = Math.max(0, millis / 1000); return String.format(Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60); }
     private final Runnable tick = new Runnable() { public void run() {
         if (destroyed) return;
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        int minute = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 + now.get(java.util.Calendar.MINUTE);
+        if (minute != clockMinute) { clockMinute = minute; clockView.setText(String.format(Locale.ROOT, "%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))); }
         updateDanmaku();
         if (casting()) { cancelPlaybackWatchdogs(); decoderPreparing = false; renderCastControls(); main.postDelayed(this, 500); return; }
         updateBufferingWatchdog(generation, video);
