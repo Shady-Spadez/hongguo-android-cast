@@ -61,3 +61,10 @@ android {
         }
     }
 }
+
+dependencies {
+    // The vendor MediaPlayer on hi3751 cannot render into regular buffer queues
+    // (sideband video output only), so video playback goes through ExoPlayer's
+    // standard MediaCodec pipeline instead.
+    implementation 'com.google.android.exoplayer:exoplayer-core:2.19.1'
+}

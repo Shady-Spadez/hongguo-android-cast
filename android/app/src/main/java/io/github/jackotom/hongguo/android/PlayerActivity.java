@@ -31,7 +31,7 @@ public final class PlayerActivity extends Activity {
     private final Set<String> caching = ConcurrentHashMap.newKeySet();
     private TextureVideoView video;
     private FrameLayout playerRoot;
-    private MediaPlayer mediaPlayer;
+    private TextureVideoView mediaPlayer;
     private String quality = "auto", actualQuality = "auto", protectedQuality = "auto";
     private final Set<PreparedMedia> pendingMedia = new HashSet<>();
     private float requestedSpeed = 1f, actualSpeed = Float.NaN;
@@ -383,9 +383,9 @@ public final class PlayerActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (now < lastProgressSavedAt || now - lastProgressSavedAt >= 15000) saveProgress();
     }
-    private void watchProgressSeeks(MediaPlayer player, int token, TextureVideoView targetView) {
-        player.setOnSeekCompleteListener(mp -> {
-            if (destroyed || token != generation || video != targetView || mediaPlayer != mp || !prepared || casting()) return;
+    private void watchProgressSeeks(int token, TextureVideoView targetView) {
+        targetView.setOnSeekCompleteListener(view -> {
+            if (destroyed || token != generation || video != targetView || !prepared || casting()) return;
             saveProgress();
         });
     }
@@ -620,11 +620,11 @@ public final class PlayerActivity extends Activity {
                             failCurrentMedia(token, "当前片源实际分辨率不符合 " + qualityLabel(playedQuality) + " 播放档位", false); return;
                         }
                         mediaPlayer = player; prepared = true; completed = false;
-                        watchProgressSeeks(player, token, targetView);
+                        watchProgressSeeks(token, targetView);
                         videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
-                        player.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
-                        try { actualSpeed = PlayerOptions.setVerifiedSpeed(player, requestedSpeed, false); }
-                        catch (Exception error) { actualSpeed = PlayerOptions.observedSpeed(player); Toast.makeText(this, "设备未接受倍速设置，当前速度以播放器确认为准", Toast.LENGTH_LONG).show(); }
+                        player.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
+                        try { targetView.setPlaybackSpeed(requestedSpeed); actualSpeed = targetView.playbackSpeed(); }
+                        catch (RuntimeException error) { actualSpeed = targetView.playbackSpeed(); Toast.makeText(this, "设备未接受倍速设置，当前速度以播放器确认为准", Toast.LENGTH_LONG).show(); }
                         if (resumeAt > 0 && (video.getDuration() <= 0 || resumeAt < video.getDuration() - 1500)) video.seekTo(resumeAt);
                         if (active && !userPaused) video.start();
                         recordProgress(targetSeries, target, resumeAt); renderStatus(); updateButtons();
@@ -670,7 +670,7 @@ public final class PlayerActivity extends Activity {
         if (!recoveryBudget.take(token, offline, currentManual, unsupported)) return false;
         int position = Math.max(0, lastGoodPosition);
         try { int actual = video.getCurrentPosition(); if (actual > 0) position = actual; } catch (RuntimeException ignored) { }
-        float confirmed = mediaPlayer == null ? Float.NaN : PlayerOptions.observedSpeed(mediaPlayer);
+        float confirmed = mediaPlayer == null ? Float.NaN : mediaPlayer.playbackSpeed();
         if (!Float.isFinite(confirmed)) confirmed = actualSpeed;
         if (Float.isFinite(confirmed)) requestedSpeed = confirmed;
         lastMediaError = reason; boolean wasPaused = userPaused, wasWeb = currentWeb;
@@ -687,7 +687,7 @@ public final class PlayerActivity extends Activity {
         int nextCeiling = automaticCeiling <= 0 ? lowerCeiling : Math.min(automaticCeiling, lowerCeiling);
         int position = Math.max(0, lastGoodPosition);
         try { int actual = video.getCurrentPosition(); if (actual > 0) position = actual; } catch (RuntimeException ignored) { }
-        float confirmed = mediaPlayer == null ? Float.NaN : PlayerOptions.observedSpeed(mediaPlayer);
+        float confirmed = mediaPlayer == null ? Float.NaN : mediaPlayer.playbackSpeed();
         if (!Float.isFinite(confirmed)) confirmed = actualSpeed;
         if (Float.isFinite(confirmed)) requestedSpeed = confirmed;
         try { cache.invalidate(owner(episode).optString("seriesId"), episode.optString("vid"), episode.optInt("index"), actualQuality, protectedCeiling); }
@@ -711,26 +711,27 @@ public final class PlayerActivity extends Activity {
         for (int i = 0; i < labels.length; i++) { labels[i] = rateLabel(PlayerOptions.SPEEDS[i]); if (Math.abs(actualSpeed - PlayerOptions.SPEEDS[i]) < .001f) selected = i; }
         showPlayerDialog(new AlertDialog.Builder(this).setTitle("播放倍速 · 设备实际确认").setSingleChoiceItems(labels, selected, (dialog, which) -> {
             dialog.dismiss(); if (!prepared || mediaPlayer == null) return;
-            float before = PlayerOptions.observedSpeed(mediaPlayer); boolean wasPlaying = video.isPlaying();
+            float before = mediaPlayer.playbackSpeed(); boolean wasPlaying = video.isPlaying();
             try {
-                float accepted = PlayerOptions.setVerifiedSpeed(mediaPlayer, PlayerOptions.SPEEDS[which], wasPlaying);
+                mediaPlayer.setPlaybackSpeed(PlayerOptions.SPEEDS[which]);
+                float accepted = mediaPlayer.playbackSpeed();
                 try { PlayerOptions.update(this, new JSONObject().put("speed", (double) accepted)); }
-                catch (Exception error) { if (Float.isFinite(before)) PlayerOptions.setVerifiedSpeed(mediaPlayer, before, wasPlaying); throw error; }
+                catch (Exception error) { if (Float.isFinite(before)) mediaPlayer.setPlaybackSpeed(before); throw error; }
                 requestedSpeed = accepted; actualSpeed = accepted;
-            } catch (Exception error) { actualSpeed = PlayerOptions.observedSpeed(mediaPlayer); Toast.makeText(this, "倍速设置未成功：" + error.getMessage(), Toast.LENGTH_LONG).show(); }
+            } catch (Exception error) { actualSpeed = mediaPlayer.playbackSpeed(); Toast.makeText(this, "倍速设置未成功：" + error.getMessage(), Toast.LENGTH_LONG).show(); }
             updateButtons();
         }).setNegativeButton("关闭", null).create());
     }
     private static final class QualitySwitch {
         final int generation, serial; int ceiling, observedShortEdge; final String quality; final JSONObject episode; final PlaybackCache.QueueWindow window;
-        Future<?> work; TextureVideoView view; MediaPlayer player; Runnable timeout; PreparedMedia media;
+        Future<?> work; TextureVideoView view; Runnable timeout; PreparedMedia media;
         QualitySwitch(int generation, int serial, String quality, JSONObject episode, PlaybackCache.QueueWindow window) { this.generation = generation; this.serial = serial; this.quality = quality; this.episode = episode; this.window = window; }
     }
     private boolean validSwitch(QualitySwitch job) { return !destroyed && qualitySwitch == job && job.generation == generation && job.serial == qualitySerial; }
     private void releaseSwitch(QualitySwitch job) {
         if (job.timeout != null) main.removeCallbacks(job.timeout);
         if (job.work != null) job.work.cancel(true);
-        if (job.player != null) job.player.setOnSeekCompleteListener(null);
+        if (job.view != null) job.view.setOnSeekCompleteListener(null);
         if (job.view != null && job.view != video) { job.view.stopPlayback(); playerRoot.removeView(job.view); }
         releasePrepared(job.media);
     }
@@ -786,8 +787,8 @@ public final class PlayerActivity extends Activity {
         candidate.setOnPreparedListener(mp -> {
             if (!validCandidate(job, candidate, stageMedia)) return;
             try {
-                // Some decoders start as a side effect of setPlaybackParams. The candidate
-                // must stay silent until the old player stops and the preference commit succeeds.
+                // The candidate must stay silent until the old player stops and the
+                // preference commit succeeds.
                 mp.setVolume(0f, 0f);
                 job.observedShortEdge = mp.getVideoWidth() > 0 && mp.getVideoHeight() > 0 ? Math.min(mp.getVideoWidth(), mp.getVideoHeight()) : 0;
                 if (!MediaQuality.meets(mp.getVideoWidth(), mp.getVideoHeight(), job.media.quality)
@@ -795,11 +796,10 @@ public final class PlayerActivity extends Activity {
                     String reason = "实际分辨率 " + mp.getVideoWidth() + "×" + mp.getVideoHeight() + " 未达到当前清晰度";
                     if (!lowerQualitySwitch(job, reason)) failQualitySwitch(job, reason); return;
                 }
-                job.player = mp;
-                if (Float.isFinite(actualSpeed)) PlayerOptions.setVerifiedSpeed(mp, actualSpeed, false); else if (mp.isPlaying()) mp.pause();
+                if (Float.isFinite(actualSpeed)) mp.setPlaybackSpeed(actualSpeed); else if (mp.isPlaying()) mp.pause();
                 int position = completed ? 0 : Math.max(0, video.getCurrentPosition());
                 if (candidate.getDuration() > 0) position = Math.min(position, Math.max(0, candidate.getDuration() - 250));
-                if (position > 0) { mp.setOnSeekCompleteListener(ignored -> { if (!validCandidate(job, candidate, stageMedia) || job.player != mp) return; mp.setOnSeekCompleteListener(null); finishQualitySwitch(job); }); candidate.seekTo(position); }
+                if (position > 0) { mp.setOnSeekCompleteListener(ignored -> { if (!validCandidate(job, candidate, stageMedia)) return; mp.setOnSeekCompleteListener(null); finishQualitySwitch(job); }); candidate.seekTo(position); }
                 else finishQualitySwitch(job);
             } catch (Exception error) { failQualitySwitch(job, error.getMessage()); }
         });
@@ -821,12 +821,12 @@ public final class PlayerActivity extends Activity {
         try { cache.invalidate(job.media.seriesId, job.episode.optString("vid"), job.episode.optInt("index"), job.media.quality, job.media.ceiling); }
         catch (Exception error) { return false; }
         if (job.timeout != null) main.removeCallbacks(job.timeout);
-        if (job.player != null) job.player.setOnSeekCompleteListener(null);
+        if (job.view != null) job.view.setOnSeekCompleteListener(null);
         if (job.view != null && job.view != video) {
             TextureVideoView rejected = job.view; job.view = null; rejected.setOnErrorListener(null); rejected.setOnPreparedListener(null);
             rejected.stopPlayback(); playerRoot.removeView(rejected);
         }
-        releasePrepared(job.media); job.media = null; job.player = null;
+        releasePrepared(job.media); job.media = null;
         status.setText(reason + " · 自动降低至 " + qualityLabel(lower) + "；当前播放保持");
         resolveQualitySwitch(job, lower); return true;
     }
@@ -834,19 +834,20 @@ public final class PlayerActivity extends Activity {
         if (!validSwitch(job)) return;
         try {
             boolean shouldPlay = active && !userPaused && !completed;
-            float accepted = Float.isFinite(actualSpeed) ? PlayerOptions.setVerifiedSpeed(job.player, actualSpeed, shouldPlay) : PlayerOptions.observedSpeed(job.player);
+            if (Float.isFinite(actualSpeed)) job.view.setPlaybackSpeed(actualSpeed);
+            float accepted = job.view.playbackSpeed();
             if (shouldPlay) job.view.start(); else job.view.pause();
             PlayerOptions.update(this, new JSONObject().put("quality", job.quality));
             TextureVideoView old = video; old.stopPlayback(); adoptMedia(job.media); playerRoot.removeView(old);
-            video = job.view; mediaPlayer = job.player; quality = job.quality;
+            video = job.view; mediaPlayer = job.view; quality = job.quality;
             mediaPlayer.setVolume(1f, 1f);
             qualitySwitch = null; if (job.timeout != null) main.removeCallbacks(job.timeout);
             automaticCeiling = job.media.ceiling;
             actualSpeed = accepted; if (Float.isFinite(accepted)) requestedSpeed = accepted; videoWidth = mediaPlayer.getVideoWidth(); videoHeight = mediaPlayer.getVideoHeight();
             bindPlayback(video, generation, episode, job.media.remote, actualQuality);
             final TextureVideoView currentView = video; final int token = generation;
-            watchProgressSeeks(mediaPlayer, token, currentView);
-            mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
+            watchProgressSeeks(token, currentView);
+            mediaPlayer.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
             currentManual = false; currentCache = job.media.cached; currentWeb = job.media.remote != null;
             currentKind = "清晰度已切换 · " + job.media.kind; renderStatus(); updateButtons(); showControls(); pruneCache();
             if (job.media.remote != null) cacheEpisode(job.media.seriesId, episode, job.media.plan, actualQuality, generation);
@@ -988,7 +989,7 @@ public final class PlayerActivity extends Activity {
             lastGoodPosition = Math.max(0, video.getCurrentPosition());
             seek.setMax(Math.max(1, video.getDuration())); seek.setProgress(lastGoodPosition); time.setText(format(video.getCurrentPosition()) + " / " + format(video.getDuration()));
             if (mediaPlayer != null) {
-                if (video.isPlaying()) actualSpeed = PlayerOptions.observedSpeed(mediaPlayer);
+                if (video.isPlaying()) actualSpeed = mediaPlayer.playbackSpeed();
                 int width = mediaPlayer.getVideoWidth(), height = mediaPlayer.getVideoHeight();
                 if (width != videoWidth || height != videoHeight) { videoWidth = width; videoHeight = height; renderStatus(); }
             }
