@@ -1,15 +1,15 @@
 package io.github.jackotom.hongguo.android;
 
 import android.content.Context;
-import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.view.Surface;
-import android.view.TextureView;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 
-import androidx.media3.common.PlaybackParameters;
-import androidx.media3.common.PlaybackException;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -17,32 +17,30 @@ import androidx.media3.exoplayer.ExoPlayer;
 import java.util.Map;
 
 /**
- * Drop-in replacement for android.widget.VideoView that plays through ExoPlayer and
- * renders into a GPU-composited TextureView.
+ * Drop-in replacement for android.widget.VideoView that plays through Media3 (ExoPlayer)
+ * and renders into a classic SurfaceView.
  *
- * On the Hisilicon hi3751 display stack the vendor MediaPlayer only outputs video
- * through its proprietary sideband channel, which never associates with this app's
- * windows ("Can not find a valid vo handle"): SurfaceView playback froze the panel
- * while decoding, and a plain SurfaceTexture target received no frames at all (black
- * video, position stuck at 0). ExoPlayer's standard MediaCodec pipeline releases
- * frames into the surface buffer queue like any normal Android view, which this
- * panel displays through the regular composition path.
+ * On this hi3751 box the vendor MediaPlayer only outputs video through its proprietary
+ * sideband channel, which never associates with third-party windows ("Can not find a
+ * valid vo handle"), and TextureView rendering on this old Mali GPU never shows frames
+ * either. The combination that does display here is the standard one used by every
+ * mainstream video app: MediaCodec through Media3 releasing GraphicBuffers into a
+ * SurfaceView, which the hardware composer overlays like a normal video layer.
  *
  * The listener shapes mirror VideoView's so call sites keep their lambdas; the
  * player parameter is this view instead of a MediaPlayer.
  */
-final class TextureVideoView extends TextureView implements TextureView.SurfaceTextureListener {
-    interface OnPreparedListener { void onPrepared(TextureVideoView view); }
-    interface OnCompletionListener { void onCompletion(TextureVideoView view); }
-    interface OnErrorListener { boolean onError(TextureVideoView view, int what, int extra); }
-    interface OnInfoListener { boolean onInfo(TextureVideoView view, int what, int extra); }
-    interface OnSeekCompleteListener { void onSeekComplete(TextureVideoView view); }
-    interface OnVideoSizeChangedListener { void onVideoSizeChanged(TextureVideoView view, int width, int height); }
+final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback {
+    interface OnPreparedListener { void onPrepared(MediaVideoView view); }
+    interface OnCompletionListener { void onCompletion(MediaVideoView view); }
+    interface OnErrorListener { boolean onError(MediaVideoView view, int what, int extra); }
+    interface OnInfoListener { boolean onInfo(MediaVideoView view, int what, int extra); }
+    interface OnSeekCompleteListener { void onSeekComplete(MediaVideoView view); }
+    interface OnVideoSizeChangedListener { void onVideoSizeChanged(MediaVideoView view, int width, int height); }
 
     private ExoPlayer player;
     private Uri source;
     private Map<String, String> headers;
-    private Surface surface;
     private boolean surfaceReady;
     private boolean prepared;
     private int seekOnPrepare;
@@ -54,9 +52,9 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
     private OnSeekCompleteListener onSeekCompleteListener;
     private OnVideoSizeChangedListener onVideoSizeChangedListener;
 
-    TextureVideoView(Context context) {
+    MediaVideoView(Context context) {
         super(context);
-        setSurfaceTextureListener(this);
+        getHolder().addCallback(this);
     }
 
     public void setVideoURI(Uri uri) { setVideoURI(uri, null); }
@@ -101,7 +99,7 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
 
     public void setVolume(float left, float right) { if (player != null) player.setVolume(Math.min(left, right)); }
 
-    /** Mirrors PlayerOptions.observedSpeed/setVerifiedSpeed semantics on ExoPlayer, whose
+    /** Mirrors PlayerOptions.observedSpeed/setVerifiedSpeed semantics on Media3, whose
      *  setPlaybackParameters neither throws spuriously nor resumes a paused player. */
     public float playbackSpeed() { return player == null ? 1f : player.getPlaybackParameters().speed; }
 
@@ -126,26 +124,23 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
         setMeasuredDimension(width, height);
     }
 
-    @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-        surface = new Surface(texture);
+    @Override public void surfaceCreated(SurfaceHolder holder) {
         surfaceReady = true;
         if (player == null && source != null) open();
     }
 
-    @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) { }
+    @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { }
 
-    @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+    @Override public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
-        if (surface != null) { surface.release(); surface = null; }
         release();
-        return true;
     }
-
-    @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) { }
 
     private void open() {
         release();
         if (source == null || !surfaceReady) return;
+        Surface surface = getHolder().getSurface();
+        if (surface == null || !surface.isValid()) return;
         ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
         fresh.setMediaItem(MediaItem.fromUri(source));
@@ -158,11 +153,11 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
                         prepared = true;
                         if (seekOnPrepare != 0) { fresh.seekTo(seekOnPrepare); seekOnPrepare = 0; }
                         OnPreparedListener preparedCallback = onPreparedListener;
-                        if (preparedCallback != null) preparedCallback.onPrepared(TextureVideoView.this);
+                        if (preparedCallback != null) preparedCallback.onPrepared(MediaVideoView.this);
                     }
                 } else if (state == Player.STATE_ENDED) {
                     OnCompletionListener completionCallback = onCompletionListener;
-                    if (completionCallback != null) completionCallback.onCompletion(TextureVideoView.this);
+                    if (completionCallback != null) completionCallback.onCompletion(MediaVideoView.this);
                 }
             }
 
@@ -171,14 +166,14 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
                     videoWidth = size.width; videoHeight = size.height;
                     requestLayout();
                     OnVideoSizeChangedListener sizeCallback = onVideoSizeChangedListener;
-                    if (sizeCallback != null) sizeCallback.onVideoSizeChanged(TextureVideoView.this, size.width, size.height);
+                    if (sizeCallback != null) sizeCallback.onVideoSizeChanged(MediaVideoView.this, size.width, size.height);
                 }
             }
 
             @Override public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, int reason) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                     OnSeekCompleteListener seekCallback = onSeekCompleteListener;
-                    if (seekCallback != null) seekCallback.onSeekComplete(TextureVideoView.this);
+                    if (seekCallback != null) seekCallback.onSeekComplete(MediaVideoView.this);
                 }
             }
 
