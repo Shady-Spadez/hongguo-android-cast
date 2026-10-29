@@ -491,6 +491,19 @@ public final class PlayerActivity extends Activity {
                         media.plan = PlaybackSources.register(info, target.optString("vid"), false);
                     }
                 } else media.plan = PlaybackSources.resolvePlayback(media.seriesId, target.optString("vid"), stageQuality, ceiling, false, failedWeb);
+                if (media.plan.source.equals("web")) {
+                    // This device's decoder cannot output frames for the web HEVC streams
+                    // (hvc1 beyond the codec's declared capabilities: MediaCodec logs
+                    // NoSupport and no frame ever reaches the surface), while the App
+                    // source ranking prefers H264, which renders cleanly. Swap the web
+                    // plan for a fresh App plan; keep the web plan only if the App
+                    // source is unavailable.
+                    try {
+                        media.plan = PlaybackSources.resolvePlayback(media.seriesId, target.optString("vid"), stageQuality, ceiling, true, true);
+                    } catch (Exception appUnavailable) {
+                        if (Thread.currentThread().isInterrupted()) throw (java.io.InterruptedIOException) new java.io.InterruptedIOException("播放准备已取消").initCause(appUnavailable);
+                    }
+                }
                 if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("播放准备已取消");
                 if (media.plan.playbackCeiling != ceiling) throw new java.io.IOException("播放片源清晰度边界不匹配");
                 // The hi3751 system MediaPlayer silently stalls a few segments into a
