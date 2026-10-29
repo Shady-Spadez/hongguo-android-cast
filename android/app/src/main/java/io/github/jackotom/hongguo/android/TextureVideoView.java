@@ -184,7 +184,7 @@ final class TextureVideoView extends TextureView implements TextureView.SurfaceT
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                int code = error.getErrorCode();
+                int code = error.errorCode;
                 boolean unsupported = code == PlaybackException.ERROR_CODE_DECODING_FAILED
                         || code == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                         || code == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES
