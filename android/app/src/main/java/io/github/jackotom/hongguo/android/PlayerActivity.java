@@ -181,7 +181,7 @@ public final class PlayerActivity extends Activity {
         background.addState(new int[]{android.R.attr.state_pressed}, new android.graphics.drawable.ColorDrawable(0xffbf360c));
         background.addState(new int[0], new android.graphics.drawable.ColorDrawable(0x22ffffff));
         b.setBackground(background);
-        b.setContentDescription(text); b.setOnClickListener(view -> { showControls(); action.run(); }); return b;
+        b.setContentDescription(text); b.setOnClickListener(view -> { userControls(); action.run(); }); return b;
     }
     private TextView label(int size) { TextView v = new TextView(this); v.setTextColor(0xffffffff); v.setTextSize(size); return v; }
     private void buildViews() {
@@ -222,7 +222,7 @@ public final class PlayerActivity extends Activity {
         time = label(12); content.addView(time);
         seek = new SeekBar(this); seek.setContentDescription("播放进度"); content.addView(seek, new LinearLayout.LayoutParams(-1, dp(BuildConfig.IS_TV ? 40 : 48)));
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onStartTrackingTouch(SeekBar bar) { dragging = true; showControls(); }
+            public void onStartTrackingTouch(SeekBar bar) { dragging = true; userControls(); }
             public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
                 if (fromUser) {
                     time.setText(format(progress) + " / " + format(playbackDuration()));
@@ -230,7 +230,7 @@ public final class PlayerActivity extends Activity {
                     if (!dragging && prepared && !castCommand("seek", progress)) video.seekTo(progress);
                 }
             }
-            public void onStopTrackingTouch(SeekBar bar) { dragging = false; if (prepared && !castCommand("seek", bar.getProgress())) video.seekTo(bar.getProgress()); showControls(); }
+            public void onStopTrackingTouch(SeekBar bar) { dragging = false; if (prepared && !castCommand("seek", bar.getProgress())) video.seekTo(bar.getProgress()); userControls(); }
         });
         LinearLayout actions = new LinearLayout(this); actions.setGravity(Gravity.CENTER_VERTICAL);
         previous = button("上一集", () -> move(-1)); toggle = button("暂停", this::togglePlayback); next = button("下一集", () -> move(1));
@@ -352,6 +352,14 @@ public final class PlayerActivity extends Activity {
     }
     private void updateControlsState() { if (controlsHud == null || silentAdvance) return; controlsHud.playback(canHideControls()); }
     private void showControls() {
+        // Automatic paths (stage progress, auto re-source, buffering) must not break
+        // the immersive auto-advance window; only genuine user intent reveals.
+        if (silentAdvance) return;
+        if (controlsHud == null) return;
+        controlsHud.interact(); updateControlsState();
+    }
+    private void userControls() {
+        silentAdvance = false;
         if (controlsHud == null) return;
         controlsHud.interact(); updateControlsState();
     }
@@ -366,7 +374,7 @@ public final class PlayerActivity extends Activity {
         else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) touchingControls = false;
         // Dispatch before revealing: a tap on hidden controls is only a reveal, never a click.
         boolean handled = super.dispatchTouchEvent(event);
-        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) showControls();
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) userControls();
         return handled;
     }
     private void updateButtons() {
@@ -1416,25 +1424,25 @@ public final class PlayerActivity extends Activity {
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_UP) exitPlayer(); return true; }
         int key = event.getKeyCode();
         boolean navigation = key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN || key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER;
-        if (navigation && key == wakeKey) { showControls(); if (event.getAction() == KeyEvent.ACTION_UP) wakeKey = KeyEvent.KEYCODE_UNKNOWN; return true; }
+        if (navigation && key == wakeKey) { userControls(); if (event.getAction() == KeyEvent.ACTION_UP) wakeKey = KeyEvent.KEYCODE_UNKNOWN; return true; }
         if (navigation && event.getAction() == KeyEvent.ACTION_DOWN && controlsHud != null && !controlsHud.isVisible()) {
-            wakeKey = key; showControls();
+            wakeKey = key; userControls();
             if (toggle.isEnabled()) toggle.requestFocus(); else back.requestFocus();
             return true;
         }
-        if (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_UP) showControls();
+        if (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_UP) userControls();
         return super.dispatchKeyEvent(event);
     }
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         if (video == null) return super.onKeyDown(key, event);
-        if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || ((key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER) && video.hasFocus())) { togglePlayback(); showControls(); return true; }
+        if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || ((key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER) && video.hasFocus())) { togglePlayback(); userControls(); return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_NEXT) { move(1); return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_PREVIOUS) { move(-1); return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_PLAY) { if (!castCommand("play", 0) && prepared) { userPaused = false; video.start(); updateButtons(); } return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_PAUSE) { if (!castCommand("pause", 0) && prepared) { userPaused = true; video.pause(); saveProgress(); updateButtons(); } return true; }
         if (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND) { seekBy(key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? 30000 : -10000); return true; }
         if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) { seekBy(key == KeyEvent.KEYCODE_DPAD_LEFT ? -10000 : 10000); return true; }
-        if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) { showControls(); toggle.requestFocus(); return true; }
+        if (video.hasFocus() && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)) { userControls(); toggle.requestFocus(); return true; }
         return super.onKeyDown(key, event);
     }
     @Override protected void onPause() { active = false; cancelPlaybackWatchdogs(); if (danmaku != null) danmaku.suspend(); touchingControls = false; wakeKey = KeyEvent.KEYCODE_UNKNOWN; if (controlsHud != null) controlsHud.suspend(); saveProgress(); if (!casting() && video != null && prepared) video.pause(); super.onPause(); }
