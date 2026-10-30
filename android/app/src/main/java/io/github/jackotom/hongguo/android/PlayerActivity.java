@@ -174,6 +174,13 @@ public final class PlayerActivity extends Activity {
     private Button button(String text, Runnable action) {
         Button b = new Button(this); b.setText(text); b.setTextColor(0xffffffff); b.setTextSize(BuildConfig.IS_TV ? 17 : 14);
         b.setMinWidth(0); b.setMinimumWidth(0); b.setMinHeight(dp(48)); b.setPadding(dp(8), 0, dp(8), 0);
+        // The platform default focus ring is invisible at TV distance; make focus an
+        // unmistakable filled state instead.
+        android.graphics.drawable.StateListDrawable background = new android.graphics.drawable.StateListDrawable();
+        background.addState(new int[]{android.R.attr.state_focused}, new android.graphics.drawable.ColorDrawable(0xffff5722));
+        background.addState(new int[]{android.R.attr.state_pressed}, new android.graphics.drawable.ColorDrawable(0xffbf360c));
+        background.addState(new int[0], new android.graphics.drawable.ColorDrawable(0x22ffffff));
+        b.setBackground(background);
         b.setContentDescription(text); b.setOnClickListener(view -> { showControls(); action.run(); }); return b;
     }
     private TextView label(int size) { TextView v = new TextView(this); v.setTextColor(0xffffffff); v.setTextSize(size); return v; }
@@ -448,7 +455,7 @@ public final class PlayerActivity extends Activity {
     /** A successful stage owns its exact-quality reservation until UI adoption/cancellation. */
     private static final class PreparedMedia {
         final JSONObject episode, series; final String quality, seriesId; final int ceiling; final PlaybackCache.QueueWindow window; boolean protectedKey;
-        Uri uri; String remote, kind; PlaybackSources.Plan plan; boolean manual, cached;
+        Uri uri; String remote, kind; PlaybackSources.Plan plan; boolean manual, cached; java.util.concurrent.Future<?> staging;
         PreparedMedia(JSONObject series, JSONObject episode, String quality, int ceiling, PlaybackCache.QueueWindow window) { this.ceiling=ceiling; this.series = series; this.seriesId = series.optString("seriesId"); this.episode = episode; this.quality = quality; this.window = window; }
     }
     private synchronized PreparedMedia reserveMedia(JSONObject target, String stageQuality, int ceiling, PlaybackCache.QueueWindow window) throws Exception {
@@ -460,6 +467,7 @@ public final class PlayerActivity extends Activity {
     private synchronized void releasePrepared(PreparedMedia media) {
         if (media == null) return;
         pendingMedia.remove(media);
+        if (media.staging != null) media.staging.cancel(true);
         if (media.protectedKey) {
             cache.release(media.seriesId, media.episode.optString("vid"), media.episode.optInt("index"), media.quality, media.ceiling);
             media.protectedKey = false;
@@ -518,12 +526,30 @@ public final class PlayerActivity extends Activity {
                 // The hi3751 system MediaPlayer silently stalls a few segments into a
                 // direct web stream (its HTTP stack stops fetching), so never hand it a
                 // remote URL: stage the whole episode via the Node pipeline and play the
-                // local file, which the hardware decoder handles cleanly.
-                File ready = cache.fetchForeground(media.seriesId, target.optString("vid"), target.optInt("index"), media.plan, stageQuality);
+                // local file, which the hardware decoder handles cleanly. The staging runs
+                // on the cache worker and playback starts from the growing .part once its
+                // head is buffered, instead of waiting for the full episode.
+                final String stageVid = target.optString("vid"); final int stageIndex = target.optInt("index");
+                java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality));
+                File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
                 media.uri = Uri.fromFile(ready); media.kind = "片源已准备 · 缓存播放"; media.cached = true;
+                media.staging = ready.getName().endsWith(".part") ? staging : null;
             }
             success = true; return media;
         } finally { if (!success) releasePrepared(media); }
+    }
+    /** Wait only until the in-flight staging transfer has buffered minBytes of the .part
+     *  file, then return the part for early playback; fall back to waiting for the whole
+     *  transfer when the head is slow. Runs on the resolver worker. */
+    private static File awaitStagedHead(File part, long minBytes, java.util.concurrent.Future<File> staging) throws Exception {
+        long deadline = System.currentTimeMillis() + 15000;
+        for (;;) {
+            if (Thread.currentThread().isInterrupted()) { staging.cancel(true); throw new java.io.InterruptedIOException("播放准备已取消"); }
+            if (part.isFile() && part.length() >= minBytes) return part;
+            if (staging.isDone()) return staging.get();
+            if (System.currentTimeMillis() >= deadline) return staging.get();
+            Thread.sleep(200);
+        }
     }
     private static int stageCeiling(String quality, int maximumEdge) {
         int fixed = AdaptiveQuality.ceiling(quality);
@@ -658,7 +684,7 @@ public final class PlayerActivity extends Activity {
                     });
                     Map<String, String> headers = new HashMap<>();
                     headers.put("User-Agent", media.plan == null ? NetworkGuard.UA : media.plan.userAgent); headers.put("Referer", media.plan == null ? NetworkGuard.REFERER : media.plan.referer);
-                    try { armPreparationTimeout(token, targetView); targetView.setVideoURI(media.uri, headers); }
+                    try { armPreparationTimeout(token, targetView); targetView.setVideoURI(media.uri, headers, media.staging); media.staging = null; }
                     catch (RuntimeException error) { failCurrentMedia(token, "设备打开视频未成功：" + error.getMessage(), false); }
                 });
             } catch (Exception error) { main.post(() -> playbackError(token, recovering ? "自动恢复未成功：" + error.getMessage() + "；原错误：" + lastMediaError : error.getMessage())); }
