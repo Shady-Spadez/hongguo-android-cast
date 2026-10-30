@@ -82,6 +82,10 @@ final class PlaybackCache {
         discardLegacyAuto(sid,vid,index,quality);
         return policy.fetchForeground(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index,plan.url,(value,file,max)->PlaybackSources.download(plan,file,max));
     }
+    File stagingPart(String sid,String vid,int index,PlaybackSources.Plan plan,String quality) {
+        if(plan==null) return null;
+        return policy.stagingPart(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index);
+    }
     void prune(String sid, int currentIndex, int keepPrevious) throws Exception { policy.prune(sid, currentIndex, keepPrevious); }
     JSONObject status() throws Exception {
         PlaybackCachePolicy.Stats stats = policy.status();

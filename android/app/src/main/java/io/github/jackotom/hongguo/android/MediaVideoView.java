@@ -12,9 +12,16 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
+import androidx.media3.datasource.BaseDataSource;
+import androidx.media3.datasource.C;
+import androidx.media3.datasource.DataSpec;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 /**
  * Drop-in replacement for android.widget.VideoView that plays through Media3 (ExoPlayer)
@@ -41,6 +48,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     private ExoPlayer player;
     private Uri source;
     private Map<String, String> headers;
+    private Future<?> staging;
     private boolean surfaceReady;
     private boolean prepared;
     private int seekOnPrepare;
@@ -57,10 +65,15 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         getHolder().addCallback(this);
     }
 
-    public void setVideoURI(Uri uri) { setVideoURI(uri, null); }
+    public void setVideoURI(Uri uri) { setVideoURI(uri, null, null); }
 
-    public void setVideoURI(Uri uri, Map<String, String> requestHeaders) {
-        source = uri; headers = requestHeaders; prepared = false; seekOnPrepare = 0;
+    public void setVideoURI(Uri uri, Map<String, String> requestHeaders) { setVideoURI(uri, requestHeaders, null); }
+
+    /** @param stagingCompletion when non-null the URI points at a .part file that the given
+     *  future is still appending to; playback reads block at the staged head until the
+     *  future completes (or fail if it completes exceptionally). */
+    public void setVideoURI(Uri uri, Map<String, String> requestHeaders, Future<?> stagingCompletion) {
+        source = uri; headers = requestHeaders; staging = stagingCompletion; prepared = false; seekOnPrepare = 0;
         open();
     }
 
@@ -141,10 +154,15 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if (source == null || !surfaceReady) return;
         Surface surface = getHolder().getSurface();
         if (surface == null || !surface.isValid()) return;
-        if ("file".equals(source.getScheme())) patchHevcLevelClaim(source.getPath());
+        if ("file".equals(source.getScheme())) {
+            if (staging != null) awaitStagedHead(source.getPath(), 768 * 1024);
+            patchHevcLevelClaim(source.getPath());
+        }
         ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
-        fresh.setMediaItem(MediaItem.fromUri(source));
+        if (staging != null && "file".equals(source.getScheme()))
+            fresh.setMediaSource(new ProgressiveMediaSource.Factory(() -> new GrowingFileDataSource(new java.io.File(source.getPath()), staging)).createMediaSource(MediaItem.fromUri(source)));
+        else fresh.setMediaItem(MediaItem.fromUri(source));
         fresh.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_BUFFERING) notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_START);
@@ -196,6 +214,74 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     private void notifyInfo(int what) {
         OnInfoListener listener = onInfoListener;
         if (listener != null) listener.onInfo(this, what, 0);
+    }
+
+    /** Block until the growing file has at least minBytes staged (enough for the moov plus
+     *  the level patch), the staging future completes, or a generous timeout — after which
+     *  the data source itself blocks on reads instead. */
+    private void awaitStagedHead(String path, long minBytes) {
+        java.io.File file = new java.io.File(path);
+        long deadline = System.currentTimeMillis() + 20000;
+        while (!file.isFile() || file.length() < minBytes) {
+            if (staging == null || staging.isDone() || System.currentTimeMillis() >= deadline) return;
+            try { Thread.sleep(200); } catch (InterruptedException error) { Thread.currentThread().interrupt(); return; }
+        }
+    }
+
+    /** Reads a file that is still being appended to by the staging download. Reads at the
+     *  staged head wait for more bytes; end-of-input is only reported once the staging
+     *  future has completed successfully. The fd is opened once, so the policy's atomic
+     *  .part → final rename mid-read is transparent. */
+    private static final class GrowingFileDataSource extends BaseDataSource {
+        private final java.io.File file;
+        private final Future<?> staging;
+        private RandomAccessFile data;
+        private long position;
+        private Uri uri;
+
+        GrowingFileDataSource(java.io.File file, Future<?> staging) {
+            super(false);
+            this.file = file;
+            this.staging = staging;
+        }
+
+        @Override public long open(DataSpec spec) throws IOException {
+            transferInitializing(spec);
+            data = new RandomAccessFile(file, "r");
+            uri = Uri.fromFile(file);
+            position = spec.position;
+            transferOpened(spec, true, false);
+            return C.LENGTH_UNSET;
+        }
+
+        @Override public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) return 0;
+            for (;;) {
+                if (data == null) throw new IOException("缓存数据源已关闭");
+                long staged = data.length();
+                if (position >= staged) {
+                    if (staging.isDone()) {
+                        try { staging.get(); } catch (Exception failure) { throw new IOException("缓存下载未完成", failure); }
+                        return C.RESULT_END_OF_INPUT;
+                    }
+                    try { Thread.sleep(100); } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException("缓存读取已取消", error); }
+                    continue;
+                }
+                int readable = (int) Math.min(length, staged - position);
+                data.seek(position);
+                int read = data.read(buffer, offset, readable);
+                if (read < 0) return C.RESULT_END_OF_INPUT;
+                if (read > 0) { position += read; bytesTransferred(read); }
+                return read;
+            }
+        }
+
+        @Override public Uri getUri() { return uri; }
+
+        @Override public void close() throws IOException {
+            uri = null;
+            if (data != null) { try { data.close(); } finally { data = null; transferEnded(); } }
+        }
     }
 
     /**

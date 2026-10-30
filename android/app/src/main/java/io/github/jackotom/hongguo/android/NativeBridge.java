@@ -31,7 +31,7 @@ final class NativeBridge {
     private final ThreadPoolExecutor searchWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
     // Login/cloud control never occupies source or media request workers.
     private final ThreadPoolExecutor accountWorker = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
-    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest"));
+    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "prefetchPlayback", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest"));
     NativeBridge(MainActivity activity) { this.activity = activity; store = new LibraryStore(activity); downloads = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE); }
     @JavascriptInterface public void postMessage(String message) {
         if (message == null || message.length() > 256 * 1024 || message.getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return;
@@ -244,6 +244,23 @@ final class NativeBridge {
             }
             case "getPlaybackCache": respond(id, PlaybackCache.get(activity).status(), null); break;
             case "clearPlaybackCache": respond(id, PlaybackCache.get(activity).clear(), null); break;
+            case "prefetchPlayback": {
+                // Detail-page background warm-up: stage the episode into the playback cache
+                // before the user presses play, using the same plan/cache the player will
+                // consult, so the first episode starts from the (possibly still growing)
+                // staged file instead of a cold fetch.
+                JSONObject series = LibraryStore.series(params.getJSONObject("series")), episode = LibraryStore.episode(params.getJSONObject("episode"));
+                String sid = series.getString("seriesId"), vid = episode.getString("vid");
+                int index = episode.getInt("index");
+                JSONObject defaults = PlayerOptions.read(activity);
+                String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : String.valueOf(defaults.opt("quality", "auto")));
+                PlaybackCache cache = PlaybackCache.get(activity);
+                if (cache.find(sid, vid, index, quality, 0) != null) { respond(id, new JSONObject().put("cached", true), null); break; }
+                PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, false, false);
+                if (plan.source.equals("web")) { try { plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, true, true); } catch (Exception ignored) { } }
+                File ready = cache.fetch(sid, vid, index, plan, quality);
+                respond(id, new JSONObject().put("cached", ready != null), null); break;
+            }
             case "play": {
                 JSONObject series = LibraryStore.series(params.getJSONObject("series")), episode = LibraryStore.episode(params.getJSONObject("episode"));
                 Object rawQueue = params.opt("episodes");

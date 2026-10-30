@@ -299,6 +299,12 @@ final class PlaybackCachePolicy {
     File fetch(String sid, String vid, int index, String url) throws Exception {
         return fetch(sid, vid, index, url, downloader);
     }
+    /** Path an in-flight staging transfer is appending to; grows monotonically until the
+     *  atomic rename to the final key on completion. Purely informational for callers
+     *  that want to start consuming the head bytes early. */
+    File stagingPart(String sid, String vid, int index) {
+        return new File(directory, key(sid, vid, index) + ".part");
+    }
     File fetch(String sid, String vid, int index, String url, Downloader transfer) throws Exception {
         return fetch(sid, vid, index, url, transfer, false);
     }
