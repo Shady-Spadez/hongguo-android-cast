@@ -250,7 +250,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             data = new RandomAccessFile(file, "r");
             uri = Uri.fromFile(file);
             position = spec.position;
-            transferOpened(spec);
+            transferStarted(spec);
             return C.LENGTH_UNSET;
         }
 
