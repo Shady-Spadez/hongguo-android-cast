@@ -301,24 +301,35 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             long length = file.length();
             byte[] buffer = new byte[(int) Math.min(window, length)];
             file.readFully(buffer);
+            // Locate the hvcC box and confine every rewrite strictly inside it: the
+            // SPS-pattern bytes also occur by chance inside mdat sample data (emulation
+            // prevention runs), and touching those corrupts NAL boundaries ("Invalid NAL
+            // length" from the extractor). Media3 derives the codec string from the hvcC
+            // only, so that box is both sufficient and the only safe place.
+            int boxStart = -1, boxEnd = buffer.length;
             for (int i = 0; i + 20 <= buffer.length; i++) {
                 if (buffer[i] != 'h' || buffer[i + 1] != 'v' || buffer[i + 2] != 'c' || buffer[i + 3] != 'C') continue;
                 if (buffer[i + 4] != 1) continue; // configurationVersion
-                int levelOffset = i + 4 + 12; // general_level_idc within hvcC payload
-                int level = buffer[levelOffset] & 0xff;
-                if (level > 123) {
-                    buffer[levelOffset] = (byte) 120;
-                    file.seek(levelOffset);
-                    file.write(buffer[levelOffset]);
+                boxStart = i;
+                if (i >= 4) {
+                    long boxSize = ((buffer[i - 4] & 0xffL) << 24) | ((buffer[i - 3] & 0xffL) << 16) | ((buffer[i - 2] & 0xffL) << 8) | (buffer[i - 1] & 0xffL);
+                    if (boxSize >= 8 && boxSize <= buffer.length) boxEnd = (int) boxSize + i - 4;
                 }
                 break;
             }
-            // The SPS NAL inside the hvcC arrays (and any in-band copy) repeats the
-            // level inside its profile_tier_level — with this encoder the zero run
-            // carries three emulation-prevention triples, so the level byte sits
-            // right after the fixed 00 00 03 00 00 03 00 00 03 00 tail. Media3
-            // derives its codec string from there, so patch it too.
-            for (int i = 0; i + 10 < buffer.length; i++) {
+            if (boxStart < 0) return;
+            int levelOffset = boxStart + 4 + 12; // general_level_idc within hvcC payload
+            if (levelOffset < boxEnd && (buffer[levelOffset] & 0xff) > 123) {
+                buffer[levelOffset] = (byte) 120;
+                file.seek(levelOffset);
+                file.write(buffer[levelOffset]);
+            }
+            // The SPS NAL inside the hvcC arrays repeats the level inside its
+            // profile_tier_level — with this encoder the zero run carries three
+            // emulation-prevention triples, so the level byte sits right after the
+            // fixed 00 00 03 00 00 03 00 00 03 00 tail. Media3 derives its codec
+            // string from there, so patch it too — inside the box only.
+            for (int i = boxStart + 18; i + 10 < boxEnd; i++) {
                 if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 3) continue;
                 if (buffer[i + 3] != 0 || buffer[i + 4] != 0 || buffer[i + 5] != 3) continue;
                 if (buffer[i + 6] != 0 || buffer[i + 7] != 0 || buffer[i + 8] != 3 || buffer[i + 9] != 0) continue;
