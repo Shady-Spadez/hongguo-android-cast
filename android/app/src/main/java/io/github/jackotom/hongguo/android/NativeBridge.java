@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.webkit.JavascriptInterface;
+import java.io.File;
 import java.util.*;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
@@ -253,12 +254,12 @@ final class NativeBridge {
                 String sid = series.getString("seriesId"), vid = episode.getString("vid");
                 int index = episode.getInt("index");
                 JSONObject defaults = PlayerOptions.read(activity);
-                String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : String.valueOf(defaults.opt("quality", "auto")));
+                String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : defaults.optString("quality", "auto"));
                 PlaybackCache cache = PlaybackCache.get(activity);
                 if (cache.find(sid, vid, index, quality, 0) != null) { respond(id, new JSONObject().put("cached", true), null); break; }
                 PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, false, false);
                 if (plan.source.equals("web")) { try { plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, true, true); } catch (Exception ignored) { } }
-                File ready = cache.fetch(sid, vid, index, plan, quality);
+                java.io.File ready = cache.fetch(sid, vid, index, plan, quality);
                 respond(id, new JSONObject().put("cached", ready != null), null); break;
             }
             case "play": {

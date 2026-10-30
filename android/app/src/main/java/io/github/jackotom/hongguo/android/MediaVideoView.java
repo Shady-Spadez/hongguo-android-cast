@@ -13,7 +13,7 @@ import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.datasource.BaseDataSource;
-import androidx.media3.datasource.C;
+import androidx.media3.common.C;
 import androidx.media3.datasource.DataSpec;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
@@ -250,7 +250,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             data = new RandomAccessFile(file, "r");
             uri = Uri.fromFile(file);
             position = spec.position;
-            transferOpened(spec, true, false);
+            transferOpened(spec);
             return C.LENGTH_UNSET;
         }
 
