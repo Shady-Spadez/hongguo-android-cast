@@ -776,6 +776,16 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     }));
   };
   useEffect(() => { if (syncReturnedEpisode.current && lastWatchedVid && state.item?.episodes?.some((entry) => String(entry.vid) === String(lastWatchedVid))) { syncReturnedEpisode.current = false; setSelectedVid(lastWatchedVid); } }, [lastWatchedVid]);
+  const warmedVid = useRef(null);
+  // Warm the native playback cache for the selected episode while the user is still
+  // browsing: pressing play then starts from the staged (possibly still growing) file
+  // instead of a cold fetch. Fire-and-forget; failures are benign.
+  useEffect(() => {
+    if (!state.item || !episode || playDispatched || mediaBusy || operation) return;
+    if (warmedVid.current === String(episode.vid)) return;
+    warmedVid.current = String(episode.vid);
+    nativeCall('prefetchPlayback', { series: compactSeries(state.item), episode: compactEpisode(episode) }, 180000).catch(() => {});
+  }, [state.item, episode, playDispatched, mediaBusy, operation]);
   const changePreference = (key) => setPreferences((previous) => {
     const next = { ...previous, [key]: !previous[key] };
     setPlaybackPreference(key, next[key]);
