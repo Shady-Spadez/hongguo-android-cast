@@ -500,6 +500,12 @@ public final class PlayerActivity extends Activity {
             if (recovering) local = null;
             if (offline && local == null) throw new Exception("这集的手动下载文件已被移除，请返回下载页检查");
             File cached = !recovering && local == null ? cache.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling) : null;
+            if (cached != null && StagedMediaCheck.firstSampleProblem(cached) != null) {
+                // An upstream content incident can leave fully-downloaded but scrambled
+                // files in the cache; drop them so playback re-fetches fresh media.
+                try { cache.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling); } catch (Exception ignored) { }
+                cached = null;
+            }
             if (local != null) { media.uri = local; media.kind = "手动下载 · 本地播放"; media.manual = true; }
             else if (cached != null) { media.uri = Uri.fromFile(cached); media.kind = "播放缓存 · 本地播放"; media.cached = true; }
             else {
@@ -540,6 +546,15 @@ public final class PlayerActivity extends Activity {
                 final String stageVid = target.optString("vid"); final int stageIndex = target.optInt("index");
                 java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality));
                 File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
+                String sampleProblem = StagedMediaCheck.firstSampleProblem(ready);
+                if (sampleProblem != null) {
+                    // Upstream content incident: complete files whose moov is valid but
+                    // whose mdat is scrambled. Stop instead of feeding the player garbage,
+                    // cancel the transfer, and clear the entry so recovery re-fetches.
+                    staging.cancel(true);
+                    try { cache.invalidate(media.seriesId, stageVid, stageIndex, stageQuality, ceiling); } catch (Exception ignored) { }
+                    throw new java.io.IOException("红果片源服务异常（" + sampleProblem + "），已清除损坏缓存，请稍后重试");
+                }
                 media.uri = Uri.fromFile(ready); media.kind = "片源已准备 · 缓存播放"; media.cached = true;
                 media.staging = ready.getName().endsWith(".part") ? staging : null;
             }
