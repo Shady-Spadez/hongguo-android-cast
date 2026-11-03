@@ -1,6 +1,7 @@
 package io.github.jackotom.hongguo.android;
 
 import android.app.*;
+import android.content.Intent;
 import android.os.*;
 import android.net.Uri;
 import android.net.http.SslError;
@@ -33,9 +34,36 @@ public final class MainActivity extends Activity {
         catch (Exception ignored) { script("window.__androidAccountChanged && window.__androidAccountChanged()"); }
     };
 
+    /** A share link opened before the page loaded is buffered and flushed on ready. */
+    private volatile String pendingSeriesId;
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleSeriesIntent(intent); }
+    /** Share links and official pages carry the series id in a query or the player path. */
+    private void handleSeriesIntent(Intent intent) {
+        Uri data = intent == null ? null : intent.getData();
+        if (data == null || !"https".equalsIgnoreCase(data.getScheme())) return;
+        String host = data.getHost() == null ? "" : data.getHost().toLowerCase(Locale.ROOT);
+        if (!host.equals("hongguoduanju.com") && !host.equals("www.hongguoduanju.com")) return;
+        String id = data.getQueryParameter("video_series_id");
+        if (id == null) id = data.getQueryParameter("series_id");
+        if (id == null) {
+            java.util.regex.Matcher match = java.util.regex.Pattern.compile("^/player/(\\d{1,30})(?:/\\d{1,30})?/?$")
+                    .matcher(data.getPath() == null ? "" : data.getPath());
+            if (match.find()) id = match.group(1);
+        }
+        if (id == null || !id.matches("[1-9][0-9]{0,29}")) return;
+        pendingSeriesId = id;
+        flushSeriesLink();
+    }
+    private void flushSeriesLink() {
+        String id = pendingSeriesId;
+        if (!loaded || id == null) return;
+        pendingSeriesId = null;
+        script("window.__androidOpenSeries && window.__androidOpenSeries('" + id + "')");
+    }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         updates = new AppUpdater(this);
+        handleSeriesIntent(getIntent());
         AccountSync.get().setListener(accountChanged);
         softwareRendering = BuildConfig.IS_TV && state != null && state.getBoolean("startupSoftwareRendering", false);
         FrameLayout container = new FrameLayout(this); webContainer = container;
@@ -157,6 +185,7 @@ public final class MainActivity extends Activity {
                 if (!token.equals(callbackToken) || !currentStartup(candidate, token) || !startup.ready(token)) return;
                 loaded = true; cancelStartupTimeout(); hideStartupPanel(); candidate.setVisibility(View.VISIBLE); candidate.requestFocus();
                 updates.pageReady();
+                flushSeriesLink();
             });
         }
         @JavascriptInterface public void failed(String callbackToken, String code) {
@@ -295,9 +324,10 @@ public final class MainActivity extends Activity {
     }
     @Override public void onBackPressed() {
         if (manualDiagnostics) { closeManualDiagnostics(); return; }
-        if (!startup.isReady() || !trusted()) { confirmExit(); return; }
-        web.evaluateJavascript("Boolean(window.__androidBack && window.__androidBack())", result -> { if (!"true".equals(result)) confirmExit(); });
+        if (!startup.isReady() || !trusted()) { minimize(); return; }
+        web.evaluateJavascript("Boolean(window.__androidBack && window.__androidBack())", result -> { if (!"true".equals(result)) minimize(); });
     }
-    private void confirmExit() { new AlertDialog.Builder(this).setTitle("退出红果？").setMessage("收藏、观看进度和下载记录会保留在本机。").setNegativeButton("继续使用", null).setPositiveButton("退出", (dialog, which) -> finish()).show(); }
+    /** Video-app back behavior: root back minimizes to the recents stack instead of exiting. */
+    private void minimize() { moveTaskToBack(true); }
     @Override protected void onDestroy() { if (updates != null) updates.destroy(); AccountSync.get().clearListener(accountChanged); cancelStartupTimeout(); startup.destroy(); PlaybackSources.detach(this); destroyWebView(); super.onDestroy(); }
 }

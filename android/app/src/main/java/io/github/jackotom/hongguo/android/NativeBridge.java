@@ -4,9 +4,11 @@ import android.app.DownloadManager;
 import android.content.*;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.webkit.JavascriptInterface;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.util.*;
 import java.nio.charset.StandardCharsets;
@@ -32,7 +34,7 @@ final class NativeBridge {
     private final ThreadPoolExecutor searchWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
     // Login/cloud control never occupies source or media request workers.
     private final ThreadPoolExecutor accountWorker = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
-    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "prefetchPlayback", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest"));
+    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest", "officialWebQrcode", "officialWebPoll", "officialWebLogout", "officialWebCancel", "getAnnouncements", "searchNewReleases", "homeFeed", "mergeDownloads", "getMergedVideos", "deleteMergedVideo", "playMergedVideo", "prefetchPlayback"));
     NativeBridge(MainActivity activity) { this.activity = activity; store = new LibraryStore(activity); downloads = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE); }
     @JavascriptInterface public void postMessage(String message) {
         if (message == null || message.length() > 256 * 1024 || message.getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return;
@@ -75,7 +77,7 @@ final class NativeBridge {
                     AccountSync.get().requireCurrent(favoriteSelection);
                 } catch (Exception error) { respond(id, null, "账号正在切换，请稍后重试收藏"); return; }
             } else { favoriteSelection = null; favoriteStore = null; }
-            ThreadPoolExecutor executor = method.startsWith("official") ? accountWorker : method.equals("searchQuery") ? searchWorker : method.equals("download") ? downloadWorker : worker;
+            ThreadPoolExecutor executor = method.startsWith("official") ? accountWorker : method.equals("searchQuery") || method.equals("searchNewReleases") || method.equals("homeFeed") ? searchWorker : method.equals("download") ? downloadWorker : worker;
             try { executor.execute(() -> { try (AutoCloseable updateLease = (method.equals("download") || method.equals("playDownload")) ? UpdateInstallCheckpoint.operation() : null) { handle(id, method, params, favoriteStore, favoriteSelection); } catch (Exception error) { respond(id, null, error.getMessage() == null ? "操作未成功，请重试" : error.getMessage()); } }); }
             catch (RejectedExecutionException error) { respond(id, null, "请求较多，请稍后重试"); }
         });
@@ -196,6 +198,122 @@ final class NativeBridge {
         if (!before.equals(AccountSync.get().ownerStamp())) throw new JSONException("账号已切换，请重新读取记录");
         return result.put("owner", before);
     }
+    /** One fresh anonymous identity per lookup; the new-release endpoint needs no account. */
+    private JSONObject newReleases(JSONObject params) throws Exception {
+        int pages = Math.max(1, Math.min(2, params == null ? 1 : params.optInt("pages", 1)));
+        long deadline = System.nanoTime() + 20_000_000_000L;
+        try (OfficialApiClient client = new OfficialApiClient(OfficialApiClient.newSession())) {
+            client.deadlineNanos(deadline);
+            client.registerDevice();
+            return new JSONObject().put("items", NewReleaseCatalog.fetch(client, pages, deadline));
+        }
+    }
+    private static final String[] COVER_HOSTS = {".fqnovelpic.com", ".byteimg.com", ".fqnovelstatic.com"};
+    /**
+     * The official home covers are HEIC, which the WebView cannot decode. Each cover is
+     * fetched, decoded, downscaled and inlined as a JPEG data URL; a HEIC template can
+     * also be re-fetched from the CDN as its webp twin, which is the only format old
+     * (pre-28) devices can decode at all. Any failure keeps the original URL: the web
+     * layer retries the webp twin itself, and a blank cover would hide a poster that
+     * might still load.
+     */
+    private static void inlineFeedCovers(org.json.JSONArray items, long deadline) {
+        if (items == null || items.length() == 0) return;
+        java.util.List<java.util.concurrent.Callable<Boolean>> jobs = new ArrayList<>();
+        for (int index = 0; index < items.length(); index++) {
+            JSONObject item = items.optJSONObject(index);
+            if (item == null) continue;
+            String url = item.optString("cover", "");
+            if (!url.startsWith("https://")) continue;
+            jobs.add(() -> { coverDataUrl(url, item); return true; });
+        }
+        if (jobs.isEmpty()) return;
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(Math.min(6, jobs.size()));
+        try { pool.invokeAll(jobs, Math.max(2, (deadline - System.nanoTime()) / 1_000_000_000L - 1), java.util.concurrent.TimeUnit.SECONDS); }
+        catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        finally { pool.shutdownNow(); }
+    }
+    private static void coverDataUrl(String url, JSONObject item) {
+        String data = coverDataUrl(url);
+        if (data == null) return;
+        try { item.put("cover", data); } catch (org.json.JSONException ignored) { }
+    }
+    private static String coverDataUrl(String url) {
+        try {
+            byte[] bytes = downloadCover(url);
+            android.graphics.Bitmap bitmap = bytes == null ? null : decodeCover(bytes);
+            if (bitmap == null) {
+                String twin = CoverVariants.webp(url);
+                if (twin != null) {
+                    byte[] retry = downloadCover(twin);
+                    bitmap = retry == null ? null : decodeCover(retry);
+                }
+            }
+            if (bitmap == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 78, out);
+            bitmap.recycle();
+            return "data:image/jpeg;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP);
+        } catch (Throwable ignored) { return null; }
+    }
+    private static byte[] downloadCover(String url) {
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+            boolean trusted = false;
+            for (String suffix : COVER_HOSTS) if (host.endsWith(suffix)) { trusted = true; break; }
+            if (!trusted) return null;
+            java.net.HttpURLConnection connection = (java.net.HttpURLConnection) uri.toURL().openConnection();
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(4000);
+            connection.setRequestProperty("User-Agent", NetworkGuard.UA);
+            int status = connection.getResponseCode();
+            if (status != 200) return null;
+            java.io.InputStream input = connection.getInputStream();
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buffer = new byte[16384];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                if (bytes.size() + read > 3_000_000) return null;
+                bytes.write(buffer, 0, read);
+            }
+            input.close();
+            connection.disconnect();
+            return bytes.toByteArray();
+        } catch (Exception ignored) { return null; }
+    }
+    /** HEIF needs ImageDecoder (API 28+), but some tv ROMs deny it via hidden-api enforcement
+     *  (linking throws NoSuchMethodError, an Error, not an Exception). Every failure — including
+     *  those — falls back to BitmapFactory, which decodes the CDN's webp twin on any API level. */
+    private static android.graphics.Bitmap decodeCover(byte[] bytes) {
+        if (Build.VERSION.SDK_INT >= 28) {
+            try {
+                android.graphics.Bitmap bitmap = android.graphics.ImageDecoder.decodeBitmap(
+                    android.graphics.ImageDecoder.createSource(bytes),
+                    (decoder, info, source) -> {
+                        int width = info.getSize().getWidth();
+                        if (width > 480) decoder.setTargetSampleSize(Math.max(1, width / 480));
+                    });
+                if (bitmap != null) return bitmap;
+            } catch (Throwable ignored) { /* fall through to BitmapFactory */ }
+        }
+        android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        int sample = 1;
+        while (bounds.outWidth / (sample * 2) >= 480) sample *= 2;
+        android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+        options.inSampleSize = sample;
+        return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+    }
+    private final java.util.concurrent.atomic.AtomicBoolean mergeBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static JSONObject rowById(JSONArray records, long downloadId) {
+        for (int at = 0; at < records.length(); at++) {
+            JSONObject row = records.optJSONObject(at);
+            if (row != null && row.optLong("id", -1) == downloadId) return row;
+        }
+        return null;
+    }
     private void handle(Object id, String method, JSONObject params) throws Exception { handle(id, method, params, null, null); }
     private void handle(Object id, String method, JSONObject params, LibraryStore favoriteStore, AccountSync.Selection favoriteSelection) throws Exception {
         if (closed) return;
@@ -207,6 +325,27 @@ final class NativeBridge {
             case "officialLogout": respond(id, AccountSync.get().logout(), null); break;
             case "officialSync": respond(id, AccountSync.get().syncNow(), null); break;
             case "officialImportGuest": respond(id, AccountSync.get().importGuest(), null); break;
+            case "officialWebQrcode": respond(id, AccountSync.get().webQrcode(), null); break;
+            case "officialWebPoll": respond(id, AccountSync.get().webPoll(), null); break;
+            case "officialWebLogout": respond(id, AccountSync.get().webLogout(), null); break;
+            case "officialWebCancel": respond(id, AccountSync.get().webCancel(), null); break;
+            case "getAnnouncements": respond(id, AnnouncementClient.fetch(), null); break;
+            case "searchNewReleases": respond(id, newReleases(params), null); break;
+            case "homeFeed": {
+                int offset = params == null ? 0 : Math.max(0, params.optInt("offset", 0));
+                String sessionId = params == null ? "" : LibraryStore.text(params, "sessionId", 128);
+                String genre = params == null ? "short_play" : params.optString("genre", "short_play");
+                if (!genre.matches("[a-z_]{1,30}")) genre = "short_play";
+                long deadline = System.nanoTime() + 20_000_000_000L;
+                try (OfficialApiClient client = new OfficialApiClient(OfficialApiClient.newSession())) {
+                    client.deadlineNanos(deadline);
+                    client.registerDevice();
+                    JSONObject result = NewReleaseCatalog.feed(client, offset, sessionId, genre);
+                    inlineFeedCovers(result.optJSONArray("items"), deadline);
+                    respond(id, result, null);
+                }
+                break;
+            }
             case "getPlaybackOptions": respond(id, PlayerOptions.read(activity), null); break;
             case "setPlaybackOptions": respond(id, PlayerOptions.update(activity, params), null); break;
             case "getSearchHistory": respond(id, store.searchHistory(), null); break;
@@ -222,6 +361,72 @@ final class NativeBridge {
             case "getSeriesHistory": respond(id, currentSeriesHistory(params), null); break;
             case "toggleFavorite": AccountSync.get().requireCurrent(favoriteSelection); if (favoriteStore == null) throw new JSONException("收藏操作缺少账号归属"); favoriteStore.toggle(LibraryStore.series(params.getJSONObject("series"))); respond(id, currentLibrary(), null); break;
             case "getDownloads": respond(id, downloadRows(), null); break;
+            case "mergeDownloads": {
+                final String seriesId = LibraryStore.text(params, "seriesId", 30);
+                if (!seriesId.matches("\\d{1,30}")) throw new Exception("剧集编号无效");
+                if (!mergeBusy.compareAndSet(false, true)) { respond(id, null, "已有一次合并正在进行，请等待完成"); break; }
+                final JSONArray records = store.downloads();
+                worker.execute(() -> {
+                    File merged = null;
+                    File target = null;
+                    try {
+                        java.util.List<MergeDownloads.Source> sources = MergeDownloads.collect(activity, records, seriesId);
+                        File directory = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                        if (directory == null || (!directory.isDirectory() && !directory.mkdirs())) throw new Exception("下载目录尚未准备");
+                        merged = File.createTempFile("merge-", ".mp4", directory);
+                        Mp4Concat.concat(sources.stream().map(source -> source.file).collect(java.util.stream.Collectors.toList()), merged);
+                        JSONObject sourceRow = rowById(records, sources.get(0).id);
+                        if (sourceRow == null) throw new Exception("合并来源记录缺失，请刷新后重试");
+                        JSONObject series = LibraryStore.series(sourceRow.getJSONObject("series"));
+                        JSONObject episode = LibraryStore.episode(sourceRow.getJSONObject("episode"));
+                        target = MergeDownloads.relocate(directory, merged, seriesId);
+                        merged = null;
+                        long recordId = System.currentTimeMillis();
+                        while (store.mergedVideo(recordId) != null) recordId++;
+                        store.addMergedVideo(recordId, series, episode, sources.size(), target.getName());
+                        target = null;
+                        respond(id, new JSONObject().put("merged", true).put("id", recordId).put("episodes", sources.size()).put("title", series.getString("title")), null);
+                    } catch (Exception error) {
+                        if (target != null && target.exists() && !target.delete()) { /* The orphan is ignored; its record was never written. */ }
+                        respond(id, null, error.getMessage() == null ? "合并未完成，请重试" : error.getMessage());
+                    } finally {
+                        mergeBusy.set(false);
+                        if (merged != null && merged.exists() && !merged.delete()) { /* A stale temporary is cleaned up by the next merge. */ }
+                    }
+                });
+                break;
+            }
+            case "getMergedVideos": {
+                JSONArray rows = store.mergedVideos(), listing = new JSONArray();
+                java.io.File directory = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject row = rows.optJSONObject(i); if (row == null) continue;
+                    java.io.File file = LibraryStore.mergedFile(directory, row);
+                    listing.put(new JSONObject().put("id", row.getLong("id")).put("title", row.optString("title")).put("seriesId", row.optString("seriesId"))
+                        .put("episodes", row.optInt("episodes")).put("status", file == null ? "missing" : "success").put("bytes", file == null ? 0 : file.length()));
+                }
+                respond(id, listing, null); break;
+            }
+            case "deleteMergedVideo": {
+                long mergedId = DownloadDeletion.confirmedId(params);
+                JSONObject row = store.mergedVideo(mergedId);
+                if (row == null) throw new Exception("合并记录不存在，请刷新后重试");
+                java.io.File target = LibraryStore.mergedFile(activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), row);
+                if (target != null && !java.nio.file.Files.deleteIfExists(target.toPath()))
+                    throw new Exception("合并视频文件删除未完成，请重试");
+                store.finishMergedVideo(mergedId);
+                respond(id, new JSONObject().put("id", mergedId).put("deleted", true), null); break;
+            }
+            case "playMergedVideo": {
+                long mergedId = params.optLong("id", -1);
+                JSONObject row = store.mergedVideo(mergedId);
+                if (row == null) throw new Exception("合并记录不存在，请刷新后重试");
+                java.io.File file = LibraryStore.mergedFile(activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), row);
+                if (file == null) throw new Exception("合并视频文件已被移除");
+                JSONObject series = LibraryStore.series(row.getJSONObject("series")), episode = LibraryStore.episode(row.getJSONObject("episode"));
+                play(id, series, episode, new JSONArray().put(episode), Uri.fromFile(file).toString(), true, params);
+                break;
+            }
             case "deleteDownload": {
                 DownloadDeletion.confirmedId(params);
                 Object owner=new Object();
@@ -334,9 +539,10 @@ final class NativeBridge {
                 if (closed) return;
                 String title = series.getString("title") + " · 第 " + episode.getInt("index") + " 集";
                 String downloadFilename=series.getString("seriesId") + "_" + episode.getInt("index") + "_" + System.currentTimeMillis() + ".mp4";
+                // Batch downloads of one series must not leave one standing notification per episode.
                 DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url)).setTitle(title).setDescription("红果 · 视频下载")
                     .addRequestHeader("User-Agent", plan.userAgent).addRequestHeader("Referer", plan.referer)
-                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
                     .setAllowedOverMetered(true).setAllowedOverRoaming(false)
                     .setDestinationInExternalFilesDir(activity, Environment.DIRECTORY_DOWNLOADS, downloadFilename);
                 long downloadId = downloads.enqueue(request);
@@ -366,18 +572,7 @@ final class NativeBridge {
         activity.runOnUiThread(() -> {
             try (UpdateOperationGate.Lease held = launchLease) {
                 if (closed || activity.isFinishing() || activity.isDestroyed()) return;
-                JSONObject defaults = PlayerOptions.read(activity);
-                String quality = MediaQuality.normalize(params.optString("quality", defaults.getString("quality")));
-                double speed = params.optDouble("speed", defaults.getDouble("speed"));
-                PlayerOptions.validateSpeed(speed);
-                Intent intent = new Intent(activity, PlayerActivity.class).putExtra("series", series.toString()).putExtra("episode", episode.toString())
-                    .putExtra("episodes", episodes.toString()).putExtra("url", url).putExtra("download", local)
-                    .putExtra("quality", quality).putExtra("speed", speed)
-                    .putExtra("autoplay", params.optBoolean("autoplay", true)).putExtra("cleanupPlaybackCache", params.optBoolean("cleanupPlaybackCache", true))
-                    .putExtra("keepPreviousEpisodes", 1).putExtra("playInfo", params.optJSONObject("playInfo") == null ? "" : params.getJSONObject("playInfo").toString());
-                // The compact descriptor crosses Binder once. Decorated per-episode owners
-                // exist only inside the player/services, never duplicated in Intent extras.
-                if (!local && params.optJSONObject("playlist") != null) intent.putExtra("playlist", params.getJSONObject("playlist").toString());
+                Intent intent = PlayLauncher.build(activity, series, episode, episodes, url, local, params);
                 UpdateInstallCheckpoint.playerLaunching();
                 activity.startActivity(intent); respond(id, new JSONObject().put("started", true), null);
             } catch (Exception error) { respond(id, null, "播放器启动未成功"); }
@@ -472,7 +667,7 @@ final class NativeBridge {
                     }
                 } catch(Exception ignored) {status="failed";reason=DownloadManager.ERROR_FILE_ERROR;}
             }
-            result.put(new JSONObject().put("id", id).put("title", row.optString("title")).put("index", row.optInt("index")).put("status", status).put("downloadedBytes", current).put("totalBytes", total).put("reason", reason));
+            result.put(new JSONObject().put("id", id).put("title", row.optString("title")).put("index", row.optInt("index")).put("seriesId", row.optJSONObject("series")==null?"":row.optJSONObject("series").optString("seriesId")).put("status", status).put("downloadedBytes", current).put("totalBytes", total).put("reason", reason));
         }
         return result;
     }

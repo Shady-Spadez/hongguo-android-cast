@@ -18,9 +18,13 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 const { build } = createRequire(import.meta.url)('esbuild');
 const fixtureSource = `
-export const CATEGORIES=[{id:'all',label:'全部'}];
+export const CATEGORIES=[{id:'all',label:'全部'},{id:'drama',label:'真人剧'}];
 export const createSource=()=>({
- catalog:async()=>({items:[window.__mobileFixture.series],totalPages:1}),
+ catalog:async(category='all',page=1)=>{
+  const f=window.__mobileFixture;f.catalogPages=f.catalogPages||[];f.catalogPages.push({category,page});
+  const batch=((page-1)%3)+1;
+  return {items:[{...f.series,title:'MOCK 批次 '+batch}],page,totalPages:3};
+ },
  detail:async()=>window.__mobileFixture.series,
  search:async keyword=>{window.__mobileFixture.searches.push(keyword);return {items:[]};},
  playback:async(sid,vid,options)=>{
@@ -33,7 +37,7 @@ export const createSource=()=>({
 function installMock() {
   const sid='1234567890123456789';
   const episodes=Array.from({length:137},(_,i)=>({vid:String(2345678901234567890n+BigInt(i)),index:i+1,webAvailable:i<3,availability:i<3?'available':'unknown'}));
-  window.__mobileFixture={series:{seriesId:sid,title:'MOCK 长剧移动布局',episodeCount:137,description:"这是一段用于验证简介展开与收起的合成剧情。".repeat(20),episodes},calls:[],sources:[],searches:[],searchKeywords:[],sourcePlans:[],optionPlans:[],playPlans:[],options:{quality:'1080p',speed:1.5},activePlay:0,maxActivePlay:0,notes:[]};
+  window.__mobileFixture={series:{seriesId:sid,title:'MOCK 长剧移动布局',episodeCount:137,description:"这是一段用于验证简介展开与收起的合成剧情。".repeat(20),episodes},calls:[],sources:[],searches:[],searchKeywords:[],sourcePlans:[],optionPlans:[],playPlans:[],options:{quality:'1080p',speed:1.5},activePlay:0,maxActivePlay:0,notes:[],downloaded:[],merged:[],mergedRows:[],deleted:[]};
   const f=window.__mobileFixture;
   window.AndroidBridge={postMessage(raw){
     const m=JSON.parse(raw); f.calls.push(m);let result,error,delay=1;
@@ -42,8 +46,24 @@ function installMock() {
     else if(m.method==='getPlaybackOptions'){const plan=f.optionPlans.shift()||{};delay=plan.delay||1;error=plan.error;result=plan.options||{...f.options};}
     else if(m.method==='setPlaybackOptions'){f.options={...f.options,...m.params};result={...f.options};}
     else if(m.method==='play'){const plan=f.playPlans.shift()||{};delay=plan.delay||1;error=plan.error;f.activePlay++;f.maxActivePlay=Math.max(f.maxActivePlay,f.activePlay);result={started:true};}
-    else if(m.method==='download')result={id:1};
-    else if(m.method==='getDownloads')result=[{id:17,status:'success',title:'MOCK 下载名称较长的短剧用于移动布局检查',index:137,downloadedBytes:1234567,totalBytes:1234567}];
+    else if(m.method==='download'){f.downloaded=f.downloaded||[];f.downloaded.push(m.params.episode&&m.params.episode.index);result={id:1};}
+    else if(m.method==='homeFeed'){
+      if(f.feedFail||window.name==='feedfail'){error='HOMEFEED_DOWN';}
+      else{const pageN=f.feedPage||0;f.feedPage=pageN+1;const base=pageN*2;
+        const genre=(m.params&&m.params.genre)||'short_play';
+        f.feedGenres=f.feedGenres||[];if(!f.feedGenres.includes(genre))f.feedGenres.push(genre);
+        const rows=pageN===0?[{series_id:sid,title:'MOCK 长剧移动布局',cover:'',episode_count:137,description:'',tags:['都市']},{series_id:String(9000000000000000001n),title:'MOCK 推荐 2',cover:'',episode_count:48,description:'',tags:['逆袭']}]
+          :[{series_id:String(9000000000000000000n+BigInt(base+1)),title:'MOCK 推荐 '+(base+1),cover:'',episode_count:60,description:'',tags:['都市']},
+            {series_id:String(9000000000000000000n+BigInt(base+2)),title:'MOCK 推荐 '+(base+2),cover:'',episode_count:48,description:'',tags:['逆袭']}];
+        result={items:rows,hasMore:pageN===0,offset:20*(pageN+1),sessionId:'s'+pageN,
+                genres:[{id:'short_play',label:'真人剧'},{id:'comic_series',label:'漫剧'},{id:'ai_series',label:'AI剧'}]};}
+    }
+    else if(m.method==='getDownloads')result=[{id:17,status:'success',title:'MOCK 下载名称较长的短剧用于移动布局检查',seriesId:sid,index:137,downloadedBytes:1234567,totalBytes:1234567},{id:18,status:'success',title:'MOCK 下载名称较长的短剧用于移动布局检查',seriesId:sid,index:136,downloadedBytes:1234567,totalBytes:1234567}].filter(x=>!(f.deleted||[]).includes(x.id));
+    else if(m.method==='getMergedVideos')result=[...(f.mergedRows||[])];
+    else if(m.method==='mergeDownloads'){f.merged=f.merged||[];f.merged.push(m.params.seriesId);f.mergedRows=f.mergedRows||[];f.mergedRows.push({id:91+f.mergedRows.length,title:'MOCK 下载名称较长的短剧用于移动布局检查 · 合并版',seriesId:m.params.seriesId,episodes:2,bytes:2469134,status:'success'});result={merged:true,episodes:2,title:'MOCK 下载名称较长的短剧用于移动布局检查'};}
+    else if(m.method==='deleteDownload'){f.deleted=f.deleted||[];f.deleted.push(m.params.id);result={id:m.params.id,deleted:true};}
+    else if(m.method==='deleteMergedVideo'){f.mergedRows=(f.mergedRows||[]).filter(x=>x.id!==m.params.id);result={id:m.params.id,deleted:true};}
+    else if(m.method==='playMergedVideo')result={started:true};
     else if(m.method==='playDownload')result={started:true};
     else if(m.method==='getPlaybackCache')result={files:0,bytes:0};
     else if(m.method==='clearPlaybackCache')result={removed:0,bytes:0};
@@ -106,7 +126,10 @@ try {
   const chooseRange=async value=>{await evaluate(`(()=>{const s=document.querySelector('#episode-range');if(!s)throw Error('missing grouped range selector');s.value=${JSON.stringify(String(value))};s.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(40);};
   const noOverflow=async()=>{
     const sizes=await evaluate(`(()=>{const nodes=[document.documentElement,document.querySelector('.main-content'),document.querySelector('.detail-scroll')].filter(Boolean);return nodes.map(e=>({class:e.className||'html',width:e.clientWidth,scroll:e.scrollWidth}));})()`);
-    check(sizes.every(s=>s.scroll<=s.width+1),'no horizontal overflow '+JSON.stringify(sizes));
+    if(sizes.some(s=>s.scroll>s.width+1)){
+      const wide=await evaluate(`(()=>{const root=document.querySelector('.main-content');const wide=[];root.querySelectorAll('*').forEach(e=>{if(e.scrollWidth>e.clientWidth+1&&e.clientWidth>0||e.getBoundingClientRect().right>document.documentElement.clientWidth+1)wide.push({cls:(e.className||e.tagName).toString().slice(0,40),w:Math.round(e.getBoundingClientRect().width),right:Math.round(e.getBoundingClientRect().right),scroll:e.scrollWidth,client:e.clientWidth});});return wide.slice(0,8);})()`);
+      throw Error('no horizontal overflow '+JSON.stringify(sizes)+' wide='+JSON.stringify(wide));
+    }
   };
   const dockVisible=async()=>{
     const positions=await evaluate(`(()=>{const r=e=>{const b=e.getBoundingClientRect();return {top:b.top,bottom:b.bottom,left:b.left,right:b.right,height:b.height}};return {dock:r(document.querySelector('.play-actions')),nav:r(document.querySelector('.app-nav')),buttons:[...document.querySelectorAll('.play-actions button')].map(r),height:innerHeight,width:innerWidth};})()`);
@@ -114,28 +137,49 @@ try {
     check(positions.buttons.every(r=>r.top>=0&&r.bottom<=positions.nav.top+1&&r.left>=0&&r.right<=positions.width),'play and download controls fully visible');
   };
   const touchTargets=async()=>{
-    const small=await evaluate(`(()=>{const main=document.querySelector('.detail-scroll')||document.querySelector('.main-content');return [...document.querySelectorAll('button,input,select')].filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden').map(e=>({label:e.getAttribute('aria-label')||e.textContent.trim().slice(0,30),w:e.getBoundingClientRect().width,h:e.getBoundingClientRect().height})).filter(r=>r.w<43.5||r.h<43.5)})()`);
-    eq(small,[],'all rendered interactive controls have at least 44px touch targets');
+    const small=await evaluate(`(()=>{const main=document.querySelector('.detail-scroll')||document.querySelector('.main-content');return [...document.querySelectorAll('button,input,select')].filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden').filter(e=>{const label=e.closest('label');return !(label&&label.getBoundingClientRect().height>=43.5)}).map(e=>({label:e.getAttribute('aria-label')||e.textContent.trim().slice(0,30),w:e.getBoundingClientRect().width,h:e.getBoundingClientRect().height})).filter(r=>r.w<43.5||r.h<43.5)})()`);
+    assert.deepEqual(small,[],'all rendered interactive controls have at least 44px touch targets: '+JSON.stringify(small));
   };
+  await group('DESIGN portrait prioritizes episodes and one exact resume action without technical clutter',async()=>{
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+    await reset();
+    eq(await evaluate('!!document.querySelector(".season-selector")'),false,'same-series history must not create a redundant season panel');
+    eq(await evaluate('document.querySelectorAll(".episode-status").length'),0,'episode tiles are numbers, not repeated resolver messages');
+    eq(await evaluate('document.querySelector(".play-actions .primary").textContent.trim()'),'继续播放 · 第 92 集','resume action names the exact remembered episode');
+    eq(await evaluate('document.querySelector(".detail-settings")?.open'),false,'secondary settings start collapsed');
+    const visible=await evaluate(`(()=>{const scroll=document.querySelector('.detail-scroll').getBoundingClientRect();return [...document.querySelectorAll('.episode-grid button')].filter(e=>{const r=e.getBoundingClientRect();return r.top>=scroll.top&&r.bottom<=scroll.bottom}).length;})()`);
+    check(visible>=18,'at least three six-column episode rows fit the initial 390px portrait viewport; got '+visible);
+    await screenshot('phone-390-redesign-light.png');
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});
+    await sleep(200);
+    await screenshot('phone-390-redesign-dark.png');
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});
+    await evaluate('document.querySelector(".detail-settings summary").click()');
+    eq(await evaluate('document.querySelector(".detail-settings").open'),true,'settings can be expanded');
+    await evaluate('document.querySelector(".setting-switch").click()');
+    eq(await evaluate('document.querySelector(".setting-switch").getAttribute("aria-checked")'),'false','expanded settings remain interactive');
+    eq((await plays()).length,0,'expanding and changing preferences never starts playback');
+    await evaluate('document.querySelector(".setting-switch").click()');
+  });
   await group('FUNCTION remembered long-series episode opens its 30-item group without playing',async()=>{
     await reset();eq(await evaluate('document.querySelectorAll(".episode-grid button").length'),30,'phone only renders active 30-episode range');eq(await evaluate('document.querySelector("#episode-range").value'),'3','remembered episode 92 reveals 91–120');eq(await evaluate('document.querySelector(".episode-grid button[aria-pressed=true]").querySelector("span").textContent'),'92','remembered selection retained');eq((await plays()).length,0,'opening remembered detail never starts video');await dockVisible();await screenshot('phone-390-initial.png');
-    await chooseRange(0);eq((await plays()).length,0,'range selection is browse only');eq(await evaluate('document.querySelector(".play-actions").textContent.includes("已选第 92 集")'),true,'range browse keeps exact playback selection');await button('定位第 92 集');await wait('document.querySelector("#episode-range").value==="3"');await wait('document.activeElement.matches(".episode-grid button[aria-pressed=true]")');eq((await plays()).length,0,'locate changes range and focus, never plays');
+    await chooseRange(0);eq((await plays()).length,0,'range selection is browse only');eq(await evaluate('document.querySelector(".play-actions").textContent.includes("第 92 集")'),true,'range browse keeps exact playback selection');await button('定位第 92 集');await wait('document.querySelector("#episode-range").value==="3"');await wait('document.activeElement.matches(".episode-grid button[aria-pressed=true]")');eq((await plays()).length,0,'locate changes range and focus, never plays');
     await chooseRange(4);eq(await evaluate('[...document.querySelectorAll(".episode-grid button")].map(e=>Number(e.querySelector("span").textContent))'),Array.from({length:17},(_,i)=>121+i),'last partial range preserves all final episodes');await tapEpisode(137);await idle();const p=(await plays())[0];eq(p.episode.index,137,'single tap starts chosen last episode');eq(p.episode.vid,'2345678901234568026','exact long-series last vid');eq(p.episodes.length,137,'complete native continuous-play queue is not truncated by UI groups');eq(p.resolveInPlayer,true,'native resolver retained');check(!p.playInfo&&!p.url,'no obsolete preflight');eq(await evaluate('window.__mobileFixture.sources.length'),0,'playing does not call JS provider');
   });
   await group('FUNCTION mobile synopsis collapses and expands accessibly while TV copy stays complete',async()=>{
-    await reset();check(await evaluate('!!document.querySelector(".description-toggle")'),'mobile synopsis has expansion control');const initial=await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height');eq(await evaluate('document.querySelector(".description-toggle").getAttribute("aria-expanded")'),'false','synopsis starts collapsed');await button('展开简介');await wait('document.querySelector(".description-toggle").getAttribute("aria-expanded")==="true"');check(await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height')>initial*2,'expanded text is actually rendered, not a label-only toggle');await button('收起简介');await wait('document.querySelector(".description-toggle").getAttribute("aria-expanded")==="false"');eq(await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height'),initial,'collapse restores three-line height');eq((await plays()).length,0,'description never starts playback');
+    await reset();check(await evaluate('!!document.querySelector(".description-toggle")'),'mobile synopsis has expansion control');const initial=await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height');eq(await evaluate('document.querySelector(".description-toggle").getAttribute("aria-expanded")'),'false','synopsis starts collapsed');await button('展开');await wait('document.querySelector(".description-toggle").getAttribute("aria-expanded")==="true"');check(await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height')>initial*2,'expanded text is actually rendered, not a label-only toggle');await button('收起');await wait('document.querySelector(".description-toggle").getAttribute("aria-expanded")==="false"');eq(await evaluate('document.querySelector(".detail-description").getBoundingClientRect().height'),initial,'collapse restores three-line height');eq((await plays()).length,0,'description never starts playback');
   });
   await group('LAYOUT phone 320, 360, 390 and low-height landscape keep actions visible and touch targets usable',async()=>{
     for(const [width,height] of [[320,640],[360,740],[390,844],[844,390]]){
       await reset(false,width,height);check(await evaluate('!!document.querySelector(".detail-scroll")'),'phone detail has independent content scroll area');await noOverflow();await dockVisible();await touchTargets();
-      await evaluate('document.querySelector(".detail-scroll").scrollTop=999999');await sleep(30);await dockVisible();await noOverflow();
+      await evaluate('document.querySelector(".detail-settings").open=true;document.querySelector(".detail-scroll").scrollTop=999999');await sleep(30);await dockVisible();await noOverflow();await touchTargets();
       const bounds=await evaluate('({last:document.querySelectorAll(".playback-settings .setting-switch")[1].getBoundingClientRect().bottom,dock:document.querySelector(".play-actions").getBoundingClientRect().top})');check(bounds.last<=bounds.dock,'last setting is not hidden behind action dock '+JSON.stringify(bounds));
       await screenshot(`phone-${width}x${height}-settings.png`);
     }
   });
   await group('LAYOUT 160 percent text at 320 and 390 wraps controls without horizontal overflow or overlap',async()=>{
     for(const width of [320,390]){
-      await reset(false,width,844,true);eq(await evaluate('getComputedStyle(document.querySelector(".playback-setting h2")).fontSize'),'24px','phone setting text scales with root text size');await noOverflow();await dockVisible();await touchTargets();
+      await reset(false,width,844,true);await evaluate('document.querySelector(".detail-settings").open=true');eq(await evaluate('getComputedStyle(document.querySelector(".playback-setting h2")).fontSize'),'24px','phone setting text scales with root text size');await noOverflow();await dockVisible();await touchTargets();
       await evaluate('document.querySelector(".detail-scroll").scrollTop=999999');await sleep(20);await noOverflow();await dockVisible();await screenshot(`phone-${width}-large-text-settings.png`);
       await evaluate('document.querySelector(".episode-section").scrollIntoView({block:"start"})');await screenshot(`phone-${width}-large-text-episodes.png`);
     }
@@ -145,11 +189,25 @@ try {
     const bounds=await evaluate('({error:document.querySelector(".operation-error").getBoundingClientRect().toJSON(),scroll:document.querySelector(".detail-scroll").getBoundingClientRect().toJSON()})');check(bounds.error.top>=bounds.scroll.top-1&&bounds.error.bottom<=bounds.scroll.bottom+1,'failure automatically scrolls into unobscured content '+JSON.stringify(bounds));await screenshot('phone-play-error.png');await button('重试播放');await idle();eq((await plays()).map(p=>p.episode.index),[95,95],'retry exact same episode');eq(await evaluate('document.querySelector("#episode-range").value'),'3','error retry retains range');
   });
   await group('FUNCTION manual download stays strict with exact selected episode and successful retry',async()=>{
-    await reset();await chooseRange(4);await clickEpisode(137);await idle();await evaluate('window.__mobileFixture.sourcePlans=[{error:"MOCK_1080_UNAVAILABLE"}]');await button('下载本集');await wait('document.querySelector(".operation-error")');eq(await evaluate('window.__mobileFixture.sources.map(s=>s.options.quality)'),['1080p'],'manual download never lowers quality');eq(await evaluate('window.__mobileFixture.calls.filter(c=>c.method==="download").length'),0,'failed source not queued');await dockVisible();await button('重试下载');await idle();const d=await evaluate('window.__mobileFixture.calls.find(c=>c.method==="download").params');eq(d.episode.index,137,'retry keeps exact target');eq(d.quality,'1080p','requested preferred quality unchanged');eq(d.playInfo.requestedQuality,'1080p','measured strict playInfo still sent');check(!d.resolveInPlayer&&!d.episodes,'download does not use player fallback or truncate queue');
+    await reset();await chooseRange(4);await clickEpisode(137);await idle();await evaluate('window.__mobileFixture.sourcePlans=[{error:"MOCK_1080_UNAVAILABLE"}]');await button('缓存');await wait('document.querySelector(".operation-error")');eq(await evaluate('window.__mobileFixture.sources.map(s=>s.options.quality)'),['1080p'],'manual download never lowers quality');eq(await evaluate('window.__mobileFixture.calls.filter(c=>c.method==="download").length'),0,'failed source not queued');await dockVisible();await button('重试下载');await idle();const d=await evaluate('window.__mobileFixture.calls.find(c=>c.method==="download").params');eq(d.episode.index,137,'retry keeps exact target');eq(d.quality,'1080p','requested preferred quality unchanged');eq(d.playInfo.requestedQuality,'1080p','measured strict playInfo still sent');check(!d.resolveInPlayer&&!d.episodes,'download does not use player fallback or truncate queue');
   });
   await group('FUNCTION rapid episode confirms retain existing synchronous coalescing and latest-wins behavior',async()=>{
     await reset();const repeated=await evaluate('Number(document.querySelectorAll(".episode-grid button")[1].querySelector("span").textContent)');await evaluate('window.__mobileFixture.optionPlans=[{delay:120}];const b=document.querySelectorAll(".episode-grid button")[1];b.click();b.click();b.click()');await sleep(180);eq((await plays()).map(p=>p.episode.index),[repeated],'same-event repeated confirms open only one player');
     await reset();const latest=await evaluate('Number(document.querySelectorAll(".episode-grid button")[5].querySelector("span").textContent)');await evaluate('window.__mobileFixture.optionPlans=[{delay:150},{delay:5}];document.querySelectorAll(".episode-grid button")[1].click();document.querySelectorAll(".episode-grid button")[5].click()');await sleep(200);eq((await plays()).map(p=>p.episode.index),[latest],'late previous options never open wrong episode');
+  });
+  await group('TVHOME the tv home renders the official feed with tv layout and focusable cards',async()=>{
+    await call('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await call('Emulation.setTouchEmulationEnabled',{enabled:false});
+    await call('Page.navigate',{url:base+'?tv=1'});await wait('document.querySelector(".poster")');await sleep(60);
+    check(await evaluate('document.querySelector(".android-app").classList.contains("tv-layout")'),'tv layout applies');
+    check(await evaluate('!!document.querySelector(".home-search")'),'the search pill renders on tv home');
+    check(await evaluate('document.querySelector(".poster strong").textContent')==='MOCK 长剧移动布局','the official feed drives the tv home grid');
+    check(await evaluate('document.querySelectorAll(".poster").length')>=2,'the feed grid is populated');
+    await evaluate('document.querySelector(".home-search").focus()');
+    check(await evaluate('document.activeElement===document.querySelector(".home-search")'),'the search pill is focusable for D-pad');
+    await noOverflow();await screenshot('tv-home-feed.png');
+    await evaluate('document.querySelector(".poster").click()');await sleep(40);
+    eq(await evaluate('document.querySelectorAll(".episode-grid button").length'),137,'a feed card opens the complete tv directory');
+    await screenshot('tv-feed-detail.png');
   });
   await group('REGRESSION TV retains all 137 episodes and D-pad focus alone never starts playback',async()=>{
     await reset(true);eq(await evaluate('document.querySelectorAll(".episode-grid button").length'),137,'TV retains complete directory');eq(await evaluate('!document.querySelector(".episode-browser")||document.querySelector(".episode-browser").hidden'),true,'mobile range controls do not participate in TV focus');eq(await evaluate('document.querySelector(".description-toggle")===null'),true,'TV retains full synopsis');await evaluate('document.querySelectorAll(".episode-grid button")[91].focus()');await call('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});await sleep(30);eq((await plays()).length,0,'D-pad focus is browse only');check(await evaluate('document.activeElement.matches(".episode-grid button")'),'D-pad remains within directory');const index=await evaluate('Number(document.activeElement.querySelector("span").textContent)');await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await idle();eq((await plays()).map(p=>p.episode.index),[index],'Enter directly plays focused exact episode once');await screenshot('tv-full-directory.png');
@@ -163,7 +221,7 @@ try {
   await group('INTEGRATION same Detail survives portrait landscape portrait without changing range or starting video',async()=>{
     await reset();await chooseRange(4);await tapEpisode(137);await idle();const first=(await plays())[0];eq(first.episodes.length,137,'initial queue contains full series');
     for(const [width,height] of [[844,390],[390,844]]){
-      await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:true});await sleep(60);await noOverflow();await dockVisible();await touchTargets();eq(await evaluate('document.querySelector("#episode-range").value'),'4','orientation preserves browsed range');eq(await evaluate('document.querySelector(".play-actions").textContent.includes("已选第 137 集")'),true,'orientation preserves selected episode');eq((await plays()).length,1,'layout change never dispatches play RPC');eq((await plays())[0].episode.vid,first.episode.vid,'exact selected identity survives');
+      await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:true});await sleep(60);await noOverflow();await dockVisible();await touchTargets();eq(await evaluate('document.querySelector("#episode-range").value'),'4','orientation preserves browsed range');eq(await evaluate('document.querySelector(".play-actions").textContent.includes("第 137 集")'),true,'orientation preserves selected episode');eq((await plays()).length,1,'layout change never dispatches play RPC');eq((await plays())[0].episode.vid,first.episode.vid,'exact selected identity survives');
     }
     await tapEpisode(137);await idle();eq((await plays()).length,2,'subsequent tap still starts exactly once');eq((await plays())[1].episodes.length,137,'queue remains complete after reflow');await screenshot('phone-orientation-restored.png');
   });
@@ -172,8 +230,78 @@ try {
     const bounds=await evaluate('({input:document.querySelector("#search-keyword").getBoundingClientRect().toJSON(),submit:document.querySelector(".search-controls button").getBoundingClientRect().toJSON(),main:document.querySelector(".main-content").getBoundingClientRect().toJSON(),nav:document.querySelector(".app-nav").getBoundingClientRect().toJSON()})');check(bounds.input.top>=bounds.main.top-1&&bounds.input.bottom<=bounds.nav.top+1,'focused input fits above native IME-sized viewport');check(bounds.submit.top>=bounds.main.top-1&&bounds.submit.bottom<=bounds.nav.top+1,'search submit remains reachable beside input');await call('Input.insertText',{text:'键盘复测'});eq(await evaluate('document.querySelector("#search-keyword").value'),'键盘复测','text entry reaches focused real React input');await call('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:bounds.submit.x+bounds.submit.width/2,y:bounds.submit.y+bounds.submit.height/2,radiusX:5,radiusY:5,force:1,id:1}]});await call('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await wait('window.__mobileFixture.searches.includes("键盘复测")');eq(await evaluate('window.__mobileFixture.searchKeywords'),['键盘复测'],'IME-sized submit keeps native history path');
     const nav=await evaluate('[...document.querySelectorAll(".app-nav button")].map(b=>b.getBoundingClientRect().toJSON())');check(nav.every(r=>r.top>=0&&r.bottom<=300&&r.left>=0&&r.right<=320),'all five navigation targets remain within reduced viewport');await screenshot('phone-320-ime-inset-search.png');await call('Emulation.setDeviceMetricsOverride',{width:320,height:844,deviceScaleFactor:1,mobile:true});await sleep(40);eq(await evaluate('document.querySelector("#search-keyword").value'),'键盘复测','restoring viewport preserves entered query');await noOverflow();await screenshot('phone-320-ime-restored-search.png');
   });
+  await group('DISCOVER home feed renders official rows and appends the next batch',async()=>{
+    await reset();await button('发现');await sleep(60);
+    const firstTitle=()=>evaluate('document.querySelector(".poster strong").textContent');
+    check(await firstTitle()==='MOCK 长剧移动布局','the official feed renders the series rows');
+    check(await evaluate('[...document.querySelectorAll(".category-tabs button")].map(b=>b.textContent).join("|")')==='真人剧|漫剧|AI剧','the official genre chips render');
+    await button('加载更多推荐');await sleep(60);
+    check(await evaluate('document.querySelectorAll(".poster-grid .poster").length')===4,'加载更多 appends the next official batch');
+    await button('漫剧');await sleep(60);
+    check(await evaluate('window.__mobileFixture.feedGenres.includes("comic_series")'),'a genre chip reloads the feed with the official id');
+    check(await firstTitle()==='MOCK 推荐 5','the genre switch refreshes the grid from the official feed');
+    check(await evaluate('document.querySelector(".category-tabs button[aria-pressed=\\"true\\"]").textContent')==='漫剧','the chosen genre chip is selected');
+    check(await evaluate('!!document.querySelector(".home-search")'),'the search pill sits on the home page');
+    await noOverflow();await screenshot('phone-discover-home-feed.png');
+  });
+  await group('DISCOVER fallback keeps the web catalog paging when the feed is down',async()=>{
+    await call('Page.navigate',{url:base});await sleep(30);
+    await evaluate('window.name="feedfail"');
+    await call('Page.navigate',{url:base});await wait('document.querySelector(".poster")');await sleep(60);
+    const firstTitle=()=>evaluate('document.querySelector(".poster strong").textContent');
+    check(await firstTitle()==='MOCK 批次 1','the web catalog takes over when the feed fails');
+    check(await evaluate('!!document.querySelector(".category-tabs")'),'categories return in the fallback');
+    await button('换一批');await sleep(60);check(await firstTitle()==='MOCK 批次 2','换一批 still advances the catalog');
+    await noOverflow();await screenshot('phone-discover-fallback.png');
+  });
+  await group('DARK the dark scheme restyles the page without overflowing',async()=>{
+    await reset();await button('发现');await sleep(60);
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});await sleep(50);
+    const lightBody=await evaluate('getComputedStyle(document.body).backgroundColor');
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await sleep(60);
+    const darkBody=await evaluate('getComputedStyle(document.body).backgroundColor');
+    check(darkBody==='rgb(19, 21, 22)','the dark background comes from the dark variable group '+darkBody);
+    check(lightBody!==darkBody,'the light background actually differs');
+    await noOverflow();await touchTargets();await screenshot('phone-discover-dark.png');
+    await call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});await sleep(40);
+  });
+  await group('BATCH download panel queues a range serially and reports progress',async()=>{
+    await reset();await button('批量下载');await wait('document.querySelector(".batch-panel")');
+    check(await evaluate('document.querySelector("#batch-start").value==="1"&&document.querySelector("#batch-end").value==="137"'),'the range defaults to the whole directory');
+    const field=(id,value)=>evaluate(`(()=>{const e=document.getElementById(${JSON.stringify(id)});Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await field('batch-end','3');await button('开始下载 3 集');
+    await wait('window.__mobileFixture.downloaded.length===3');
+    check((await evaluate('window.__mobileFixture.downloaded')).join(',')==='1,2,3','episodes are enqueued in ascending order');
+    await wait('document.querySelector(".toast")?.textContent.includes("批量下载完成：3 集已全部入队")','the batch completion is reported once');
+  });
+  await group('MERGE completed same-series downloads offer a one-tap lossless merge',async()=>{
+    await reset();await button('下载');await sleep(60);
+    check(await evaluate('!!document.querySelector(".download-group")'),'downloads group under one series header');
+    check(await evaluate('document.querySelector(".download-group-toggle").textContent.includes("2 集")'),'the completed count is shown in the header');
+    check(await evaluate('[...document.querySelectorAll(".download-group .download-row")].length===2'),'both episodes list under the group header');
+    await button('合并本剧');await wait('window.__mobileFixture.merged.length===1');
+    eq(await evaluate('window.__mobileFixture.merged[0]'),'1234567890123456789','the merge request carries the exact series id');
+    await wait('document.querySelector(".toast")?.textContent.includes("已合并 2 集")','the in-app placement is reported');
+    await wait('!!document.querySelector(".merged-row")','the merged video joins its series group');
+    check(await evaluate('document.querySelector(".merged-row h2").textContent.includes("合并版 · 2 集")'),'the merged row shows its episode span');
+    check(await evaluate('!![...document.querySelectorAll(".merged-row button")].find(b=>b.textContent.trim()==="播放")'),'the merged video is playable in place');
+  });
+  await group('GROUP-DELETE a whole series removes every episode and merged video',async()=>{
+    await reset();await button('下载');await sleep(60);
+    await button('合并本剧');await wait('(window.__mobileFixture.mergedRows||[]).length===1');
+    await wait('!!document.querySelector(".merged-row")');
+    check(await evaluate('document.querySelectorAll(".download-group .download-row").length===3'),'two episodes plus the merged row are listed');
+    await button('删除整部');
+    await wait('document.querySelector(".download-confirm")?.textContent.includes("删除整部下载？")','the whole-series confirm states its scope');
+    check(await evaluate('document.querySelector(".download-confirm").textContent.includes("合并版 × 1")'),'the confirm mentions the merged copy');
+    await button('确认删除');
+    await wait('(window.__mobileFixture.deleted||[]).length===2','both episode records are deleted');
+    await wait('(window.__mobileFixture.mergedRows||[]).length===0','the merged record is deleted too');
+    await wait('document.querySelector(".toast")?.textContent.includes("已删除整部《")','the completion is reported');
+    await wait('!document.querySelector(".download-group")','the group disappears from the list');
+  });
   await group('ISOLATION no browser exceptions or external source/media requests',async()=>{eq(report.externalRequests,[],'zero external requests');eq(report.pageErrors,[],'zero runtime exceptions');});
-  await call('Page.close');ws.close();ws=null;
+  ws.close();ws=null;
 } catch(error) {
   if(!failed){failed++;report.tests.push({name:'runner',result:'FAIL',error:error.stack});console.error(error.stack);}
 } finally {

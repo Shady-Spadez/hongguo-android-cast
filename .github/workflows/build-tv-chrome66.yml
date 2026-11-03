@@ -39,6 +39,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hongguo-tv-chrome66
+          retention-days: 7
           path: |
             dist/android/*.apk
             dist/android/SHA256SUMS*.txt

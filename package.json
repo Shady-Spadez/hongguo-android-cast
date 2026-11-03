@@ -1,8 +1,8 @@
 {
   "name": "hongguo-downloader",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "description": "红果短剧播放与下载",
-  "main": "main.js",
+  "main": "main-android.js",
   "license": "GPL-3.0",
   "scripts": {
     "start": "electron .",
@@ -34,7 +34,6 @@
     "check:android:mobile": "node scripts/check-android-mobile-update.mjs"
   },
   "dependencies": {
-    "anime4k-webgpu": "1.0.0",
     "axios": "1.20.0",
     "buffer": "6.0.3",
     "core-js": "3.51.0",
@@ -66,14 +65,15 @@
       "output": "dist"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "dist-react/**/*",
+      "main-android.js",
+      "preload-android.js",
+      "desktop-android-player/**/*",
+      "dist-react-android/**/*",
       "src/native/**/*",
       "src/store.js"
     ],
     "asar": true,
-    "artifactName": "hongguo-downloader-2.3-${os}-${arch}.${ext}",
+    "artifactName": "hongguo-downloader-3.0-${os}-${arch}.${ext}",
     "win": {
       "target": [
         {
@@ -114,7 +114,7 @@
       ]
     },
     "portable": {
-      "artifactName": "${productName}-2.3-便携版.${ext}"
+      "artifactName": "${productName}-3.0-便携版.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -122,7 +122,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "红果短剧下载器",
-      "artifactName": "hongguo-downloader-2.3-win-x64-setup.${ext}"
+      "artifactName": "hongguo-downloader-3.0-win-x64-setup.${ext}"
     },
     "mac": {
       "target": [
@@ -153,8 +153,7 @@
           "from": "build/ffmpeg/darwin-${arch}",
           "to": "bin",
           "filter": [
-            "ffmpeg",
-            "ffprobe"
+            "ffmpeg"
           ]
         },
         {
@@ -188,10 +187,59 @@
         "Contents/Resources/bin/ffprobe"
       ]
     },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Video",
+      "icon": "build/icon.png",
+      "maintainer": "skydeadpeng",
+      "extraResources": [
+        {
+          "from": "build/ffmpeg/linux-x64",
+          "to": "bin",
+          "filter": [
+            "ffmpeg"
+          ]
+        },
+        {
+          "from": "build/ffmpeg",
+          "to": "bin",
+          "filter": [
+            "FFMPEG-NOTICE.txt",
+            "COPYING.GPLv3",
+            "LICENSE.md"
+          ]
+        },
+        {
+          "from": "LICENSE",
+          "to": "LICENSE.txt"
+        },
+        {
+          "from": "NOTICE",
+          "to": "NOTICE.txt"
+        },
+        {
+          "from": "THIRD-PARTY-NOTICES.md",
+          "to": "THIRD-PARTY-NOTICES.md"
+        }
+      ]
+    },
     "publish": {
       "provider": "github",
-      "owner": "jackotom",
-      "repo": "hongguo-drama"
+      "owner": "skydeadpeng",
+      "repo": "hongguo-android-cast"
     }
   },
   "engines": {

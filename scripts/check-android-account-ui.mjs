@@ -43,9 +43,10 @@ function installMock() {
     ] },
   };
   f.guest = JSON.parse(JSON.stringify(f.library.history));
-  const accountBase = () => ({provider:'hongguo',officialLoginAvailable:true,authenticated:false,phase:'phone',revision:0,busy:false,maskedPhone:'',retryAfter:0,smsState:'',error:'',libraryReady:true,sync:{syncing:false,pendingCount:0,lastSyncAt:0,error:''}});
+  const accountBase = () => ({provider:'hongguo',officialLoginAvailable:true,authenticated:false,phase:'phone',revision:0,busy:false,maskedPhone:'',retryAfter:0,smsState:'',error:'',libraryReady:true,sync:{syncing:false,pendingCount:0,lastSyncAt:0,error:''},web:{...f.webState}});
   f.owner = () => f.account.authenticated ? 'official:'+(f.account.fixtureOwner||'a').repeat(64) : 'guest';
-  f.account=accountBase(); f.nativePhone=''; f.sendMode='sent';f.loginMode='success';f.verifyDelay=1;
+  f.webState={available:true,phase:'idle',authenticated:false,busy:false,error:'',diagnostic:'',expiresIn:0,scanState:''};
+  f.account=accountBase(); f.nativePhone=''; f.sendMode='sent';f.loginMode='success';f.verifyDelay=1;f.webMode='scanned';f.announcementFixture=null;
   f.accountRpc = m => {
     const plan=m.method==='getAccount'?(f.accountPlans.shift()||{}):{};let result,error=plan.error,delay=plan.delay||1;
     const fresh=patch=>({...f.account,...patch,revision:f.account.revision+1});
@@ -71,10 +72,20 @@ function installMock() {
     } else if(m.method==='officialSync'){
       f.account=fresh({sync:{...f.account.sync,syncing:true}});result=f.account;
       setTimeout(()=>{f.account=fresh({sync:{syncing:false,pendingCount:0,lastSyncAt:Date.now(),error:''}});window.__androidAccountChanged?.();},100);
+    } else if(m.method==='officialWebQrcode'){
+      f.webState={...f.webState,phase:'qrcode',authenticated:false,busy:false,error:'',diagnostic:'',expiresIn:180,scanState:'waiting'};
+      f.account=fresh({web:{...f.webState}});result={provider:'hongguo_web',...f.webState,image:'data:image/png;base64,SYNTHETIC_QR'};
+    } else if(m.method==='officialWebPoll'){
+      const confirmed=f.webMode==='confirmed';
+      f.webState={...f.webState,phase:confirmed?'logged_in':'scanned',authenticated:confirmed,busy:false,error:'',diagnostic:'',expiresIn:180,scanState:confirmed?'':'scanned',user:confirmed?{name:'扫码官方账号',idSuffix:'尾号 5678'}:undefined};
+      f.account=fresh({web:{...f.webState}});result={provider:'hongguo_web',...f.webState};
+    } else if(m.method==='officialWebCancel'||m.method==='officialWebLogout'){
+      f.webState={...f.webState,phase:'idle',authenticated:false,busy:false,error:'',diagnostic:'',expiresIn:0,scanState:''};
+      f.account=fresh({web:{...f.webState}});result={provider:'hongguo_web',...f.webState};
     }
     const beginRevision=f.account.revision;
     setTimeout(()=>{
-      if(m.method!=='getAccount'&&m.method!=='officialCancelLogin'&&m.method!=='officialSync'&&!error&&f.account.revision===beginRevision)f.account=JSON.parse(JSON.stringify(result));
+      if(!['getAccount','officialCancelLogin','officialSync','officialWebQrcode','officialWebPoll','officialWebCancel','officialWebLogout'].includes(m.method)&&!error&&f.account.revision===beginRevision)f.account=JSON.parse(JSON.stringify(result));
       window.__androidResponse({id:m.id,...(error?{error}:{result:JSON.parse(JSON.stringify(result))})});
       if(!error&&['officialLoginSMS','officialVerifyMFA','officialLogout'].includes(m.method)&&f.account.revision===result.revision)window.__androidAccountChanged({owner:f.owner()});
     },delay);
@@ -152,6 +163,12 @@ function installMock() {
     else if (m.method === 'getSearchHistory') result = { keywords: [...f.searchKeywords] };
     else if (m.method === 'addSearchHistory') { f.searchKeywords = [m.params.keyword, ...f.searchKeywords.filter(x => x !== m.params.keyword)].slice(0, 20); result = { keywords: [...f.searchKeywords] }; }
     else if (m.method === 'toggleFavorite') { f.library.favorites = [m.params.series]; result = f.library; }
+    else if (m.method === 'getAnnouncements') {
+      // A localStorage fixture survives the harness's per-group reload; absent key = no active file.
+      const file = localStorage.getItem('hongguo:announcements:fixture');
+      result = { normal: file, emergency: null };
+    }
+    else if (m.method === 'homeFeed') { error = 'HOMEFEED_DOWN'; } // The home page falls back to its catalog without leaving an unexpected RPC.
     else { error = 'UNEXPECTED_RPC_' + m.method; f.notes.push(error); }
     delay = plan.delay || delay; error = plan.error || error;
     setTimeout(() => {
@@ -264,87 +281,58 @@ try {
 
   const accountReady = () => wait('document.querySelector(".account-status")&&!document.querySelector(".account-status").textContent.includes("正在读取")');
   const about = async () => { await nav('关于'); await accountReady(); };
-  const field = (id, value) => evaluate(`(()=>{const e=document.getElementById(${q(id)});if(!e)throw Error('missing '+${q(id)});Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${q(value)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  // Short-message form fields are retired; the QR flow needs no text input.
   const accountCalls = method => evaluate(`window.__seasonFixture.calls.filter(c=>c.method===${q(method)}).map(c=>c.params)`);
   const retiredCalls = () => evaluate('window.__seasonFixture.calls.filter(c=>["accountLogin","accountLogout","syncHistory","importGuestHistory"].includes(c.method))');
-  const sendCode = async () => {await field('official-phone','13800000000');await button('获取短信验证码');await wait('document.querySelector("#official-code")&&!document.querySelector("#official-code").disabled');};
-  const login = async () => {await field('official-code','001234');await button('登录红果');await wait('document.querySelector(".account-details")&&document.querySelector(".account-status").textContent.includes("已登录红果")');};
-  const visibility = state => evaluate(`Object.defineProperty(document,'visibilityState',{configurable:true,value:${q(state)}});document.dispatchEvent(new Event('visibilitychange'))`);
-  await group('PHONE official SMS form has labels, no retired server controls, and no automatic send', async () => {
+  const signedAccount = () => evaluate('var f=window.__seasonFixture;f.account={...f.account,authenticated:true,phase:"logged_in",revision:f.account.revision+1,user:{name:"合成官方账号",maskedPhone:"138****0000",idSuffix:"尾号 5678"}};window.__androidAccountChanged({owner:f.owner()})');
+  await group('LOGIN the panel shows only the website QR entry with no short-message controls', async () => {
     for(const width of [320,390]){
       await reset({width,large:true,open:false});await about();
-      eq(await accountCalls('officialSendCode'),[],'opening page never sends SMS');
-      eq(await evaluate('document.querySelectorAll("#account-server,#account-password,input[type=password]").length'),0,'retired credentials absent');
-      check(await evaluate('document.querySelector("label[for=official-phone]").textContent.includes("+86")'),'mainland phone labelled');
-      const sizes=await evaluate('[...document.querySelectorAll(".account-section input,.account-section button")].map(e=>({w:e.getBoundingClientRect().width,h:e.getBoundingClientRect().height}))');check(sizes.every(r=>r.w>=44&&r.h>=44),'touch targets at least44px');
-      await noOverflow();await screenshot(`phone-${width}-official-phone.png`);
+      for(const method of ['officialSendCode','officialLoginSMS','officialVerifyMFA']) eq(await accountCalls(method),[],'opening the panel never touches the retired SMS flow');
+      eq(await evaluate('document.querySelectorAll("#official-phone,#official-code,input[type=tel],input[type=password],#account-server,#account-password").length'),0,'retired short-message and credential controls absent');
+      check(await evaluate('!!document.querySelector(".account-web")'),'the website QR section is the only login');
+      check(await evaluate('document.querySelector(".account-web").textContent.includes("获取二维码")'),'the QR entry is reachable without scrolling forms');
+      const sizes=await evaluate('[...document.querySelectorAll(".account-section button")].map(e=>({w:e.getBoundingClientRect().width,h:e.getBoundingClientRect().height}))');check(sizes.every(r=>r.w>=44&&r.h>=44),'touch targets at least44px');
+      await noOverflow();await screenshot(`phone-${width}-official-login.png`);
     }
   });
-  await group('SEND confirms masked phone and cooldown; OTP clears immediately, errors retain native phone', async () => {
-    await reset({open:false});await about();await sendCode();
-    eq(await accountCalls('officialSendCode'),[{phone:'13800000000'}],'one explicit SMS request');
-    check(await evaluate('document.querySelector(".account-status").textContent.includes("138****0000")'),'only masked phone returned');
-    check(await evaluate('!document.querySelector("#official-phone")'),'full phone field dropped after sending');
-    await evaluate('window.__seasonFixture.loginMode="wrong";window.__seasonFixture.loginDelay=150');await field('official-code','001234');await button('登录红果');
-    eq(await evaluate('document.querySelector("#official-code").value'),'','submitted OTP cleared before response');
-    await wait('document.querySelector(".account-error")?.textContent.includes("验证码错误")');
-    eq(await evaluate('document.querySelector("#official-code").value'),'','wrong OTP never restored');
-    eq(await accountCalls('officialLoginSMS'),[{code:'001234'}],'OTP exact including leading zeros, no repeated full phone');
-    await evaluate('window.__seasonFixture.loginMode="success";window.__seasonFixture.loginDelay=1');await login();
-    check(await evaluate('!document.querySelector("#official-code")'),'OTP form destroyed on success');
-  });
-  await group('UNCERTAIN send accepts a received OTP without another SMS request or false sent claim', async () => {
-    await reset({open:false});await about();await evaluate('window.__seasonFixture.sendMode="uncertain"');
-    await field('official-phone','13800000000');await button('获取短信验证码');
-    await wait('document.querySelector("#official-code")&&!document.querySelector("#official-code").disabled','uncertain delivery exposes received-code entry');
-    check(await evaluate('document.querySelector(".account-status").textContent.includes("尚未确认")&&!document.querySelector(".account-status").textContent.includes("验证码已发送")'),'uncertainty never announced as successful send');
-    await wait('document.activeElement.id==="official-code"','uncertain recovery focuses received-code entry');
-    check(await evaluate('document.querySelector(".account-section").textContent.includes("已收到短信")'),'recovery instruction explains received SMS');
-    check(await evaluate('[...document.querySelectorAll(".account-form button")].some(b=>b.disabled&&b.textContent.includes("秒后可重发"))'),'uncertain request preserves resend cooldown');
-    eq((await accountCalls('officialSendCode')).length,1,'received code entry sends no second SMS');await screenshot('phone-uncertain-received-code.png');
-    await field('official-code','001234');await button('登录红果');await wait('document.querySelector(".account-status").textContent.includes("已登录红果")');
-    eq(await accountCalls('officialLoginSMS'),[{code:'001234'}],'uncertain recovery submits exact code using native phone');
-    eq((await accountCalls('officialSendCode')).length,1,'successful recovery still has only one SMS send');
-    await reset({open:false});await about();await evaluate('var f=window.__seasonFixture;f.nativePhone="13800000000";f.account={...f.account,phase:"phone",smsState:"uncertain",maskedPhone:"138****0000",retryAfter:0,revision:f.account.revision+1};window.__androidAccountChanged()');
-    await wait('document.querySelector("#official-code")','uncertain recovery still available after cooldown');
-    check(await evaluate('[...document.querySelectorAll(".account-section button")].some(b=>b.textContent==="换手机号 / 取消")'),'expired uncertain cooldown still permits changing phone');
-    await button('换手机号 / 取消');await wait('document.querySelector("#official-phone")&&!document.querySelector("#official-code")');eq(await accountCalls('officialSendCode'),[],'changing phone never silently resends SMS');
-  });
-  await group('MFA displays upstream SMS instructions, waits for user, survives SMS-app background round trip', async () => {
-    await reset({open:false});await about();await sendCode();await evaluate('window.__seasonFixture.loginMode="mfa"');await field('official-code','123456');await button('登录红果');
-    await wait('document.querySelector("[aria-label=红果追加短信验证]")');
-    eq(await accountCalls('officialVerifyMFA'),[],'challenge does not auto query before user sends');
-    check(await evaluate('document.querySelector("[aria-label=红果追加短信验证]").textContent.includes("106900000001")&&document.querySelector("[aria-label=红果追加短信验证]").textContent.includes("SYNTHETIC MESSAGE")'),'server number and content displayed');
-    await visibility('hidden');await sleep(30);await visibility('visible');await sleep(50);
-    check(await evaluate('!!document.querySelector("[aria-label=红果追加短信验证]")'),'challenge survives switching to SMS app');
-    check((await accountCalls('officialCancelLogin')).some(x=>x.reason==='background'),'background uses suspend reason');
-    await button('我已发送短信，开始验证');await wait('document.querySelector(".account-status").textContent.includes("已登录红果")');
-    eq((await accountCalls('officialVerifyMFA')).length,1,'one user-confirmed verification');await screenshot('phone-official-signed-in.png');
-  });
-  await group('MFA in-flight cancellation bypasses busy UI and late login reply cannot revive account', async () => {
-    await reset({open:false});await about();await sendCode();await evaluate('window.__seasonFixture.loginMode="mfa"');await field('official-code','123456');await button('登录红果');await wait('document.querySelector("[aria-label=红果追加短信验证]")');
-    await evaluate('window.__seasonFixture.verifyDelay=350');await button('我已发送短信，开始验证');
-    await wait('document.querySelector(".account-status").textContent.includes("90秒")');await button('取消登录');
-    await wait('document.querySelector("#official-phone")&&!document.querySelector("#official-phone").disabled');await sleep(400);
-    check(await evaluate('!!document.querySelector("#official-phone")&&!document.querySelector(".account-section").textContent.includes("合成官方账号")'),'late authenticated reply ignored');
-    eq(await evaluate('document.querySelector("#official-phone").value'),'','explicit cancellation clears phone');
+  await group('WEBSITE QR login renders a scannable code, polls the scan state and reports the official account', async () => {
+    await reset({open:false});await about();
+    check(await evaluate('!!document.querySelector(".account-web")'),'the website QR section is present');
+    eq(await accountCalls('officialWebQrcode'),[],'opening the panel never requests a QR code');
+    check(await evaluate('document.querySelector(".account-web-title")?.textContent==="扫码登录"'),'the QR entry is the login heading');
+    await button('获取二维码');
+    await wait('document.querySelector(".account-qr img")');
+    eq((await accountCalls('officialWebQrcode')).length,1,'one explicit QR request');
+    check(await evaluate('document.querySelector(".account-qr img").getAttribute("src").startsWith("data:image/png;base64,")'),'the QR image comes from the native data URL');
+    await screenshot('phone-official-web-qrcode.png');
+    await sleep(2600);
+    check((await accountCalls('officialWebPoll')).length>0,'the scan state is polled while the QR is on screen');
+    await evaluate('window.__seasonFixture.webMode="confirmed"');
+    await sleep(2600);
+    // A web-only session is promoted to the main account area.
+    await wait('document.querySelector(".account-details").textContent.includes("扫码官方账号")');
+    await noOverflow();await screenshot('phone-official-web-login.png');
   });
   await group('SYNC and guest import require explicit action; logout keeps original local library', async () => {
-    await reset({open:false});await about();await sendCode();await login();
+    await reset({open:false});await about();await signedAccount();
+    await wait('document.querySelector(".account-details")&&[...document.querySelectorAll(".account-section button")].some(b=>b.textContent==="导入本机记录")','the signed-in actions render');
     eq(await accountCalls('officialImportGuest'),[],'login does not auto import');
     await button('导入本机记录');await wait('document.querySelector("[aria-label=确认导入本机记录]")');await button('取消');eq(await accountCalls('officialImportGuest'),[],'cancel import writes nothing');
     await button('导入本机记录');await wait('document.querySelector("[aria-label=确认导入本机记录]")');await button('确认导入');await sleep(40);eq((await accountCalls('officialImportGuest')).length,1,'one confirmed import');
     check(await evaluate('document.querySelector(".account-import-result")?.textContent.includes("收藏 1 条")&&document.querySelector(".account-import-result").textContent.includes("观看记录 2 条")&&document.querySelector(".account-import-result").textContent.includes("4 条")'),'import reports actual favorite/history counts and remaining retryable records');
     await sleep(1050);check(await evaluate('document.querySelector(".account-import-result")?.textContent.includes("收藏 1 条")'),'status polling does not erase acknowledged import result');await screenshot('phone-guest-import-counts.png');
     await button('立即同步');await wait('document.querySelector(".account-status").textContent.includes("正在同步")');await wait('document.querySelector(".account-status").textContent.includes("最近同步")');
-    await button('退出红果账号');await wait('document.querySelector("[aria-label=确认退出红果账号]")');await button('确认退出');await wait('document.querySelector("#official-phone")');
+    await button('退出红果账号');await wait('document.querySelector("[aria-label=确认退出红果账号]")');await button('确认退出');await wait('document.querySelector(".account-web")');
     eq(await evaluate('JSON.stringify(window.__seasonFixture.library.history)'),await evaluate('JSON.stringify(window.__seasonFixture.guest)'),'original guest history not deleted');
   });
-  await group('TV official phone/code/confirm focus and remote actions remain accessible', async () => {
-    await reset({tv:true,open:false});await about();await field('official-phone','13800000000');
-    await evaluate('document.getElementById("official-phone").focus()');await key('ArrowDown',40);eq(await evaluate('document.activeElement.textContent'),'获取短信验证码','D-pad reaches send');await key('Enter',13);
-    await wait('document.activeElement.id==="official-code"');await field('official-code','123456');await key('ArrowDown',40);eq(await evaluate('document.activeElement.textContent'),'登录红果','D-pad reaches login');await key('Enter',13);
-    await wait('document.querySelector(".account-status").textContent.includes("已登录红果")');await noOverflow();await screenshot('tv-official-signed-in.png');
+  await group('TV QR login focus and remote actions remain accessible', async () => {
+    await reset({tv:true,open:false});await about();
+    await evaluate('document.querySelector(".account-web button").focus()');
+    await key('Enter',13);
+    await wait('document.querySelector(".account-qr img")');
+    eq((await accountCalls('officialWebQrcode')).length,1,'D-pad reaches the QR entry');
+    await noOverflow();await screenshot('tv-official-signed-in.png');
   });
   await group('AUTOMATIC owner change clears old favorites and history even when new library read fails', async () => {
     await reset({open:false});
@@ -368,10 +356,10 @@ try {
     await sleep(1100);eq((await accountCalls('getAccount')).length,1,'only one status RPC remains in flight across events and periodic tick');
     await wait('document.querySelector(".account-error")?.textContent.includes("TEMPORARY_ACCOUNT_READ")','read failure is explicit');
     await wait('!document.querySelector(".account-error")','successful retry clears only recovered read error');
-    check(await evaluate('!!document.querySelector("#official-phone")'),'recovery keeps usable login form');
+    check(await evaluate('!!document.querySelector(".account-web")'),'recovery keeps usable QR login');
   });
   await group('NO tokens, OTP, phone or old server credential persisted to browser storage', async () => {
-    await reset({open:false});await about();await sendCode();await login();
+    await reset({open:false});await about();await signedAccount();
     const storage=await evaluate('JSON.stringify({local:localStorage,session:sessionStorage})');for(const secret of ['13800000000','001234','token','sessionid','PRIVATE'])check(!storage.includes(secret),'browser storage excludes '+secret);
     eq(await retiredCalls(),[],'no self-hosted operation remains');
   });
@@ -414,6 +402,33 @@ try {
       eq(await retiredCalls(),[],'updates do not invoke retired account');
       await noOverflow();await screenshot(tv?'tv-combined-account-update.png':'phone-combined-account-update.png');
     }
+  });
+  await group('ANNOUNCEMENTS the validated remote file renders a dialog and the switches persist', async () => {
+    await evaluate('localStorage.removeItem("hongguo:announcements:fixture");localStorage.removeItem("hongguo:announcements:v1")');
+    await reset({open:false});await about();
+    // No active remote file: no dialog, and the switches render from stored defaults.
+    check(await evaluate('!document.querySelector(".announcement-overlay")'),'no dialog without an active file');
+    check(await evaluate('!!document.querySelector(".announcement-settings")'),'the About section renders');
+    check(await evaluate('document.querySelector(".announcement-switches input").checked'),'the normal switch defaults on');
+    await evaluate('document.querySelector(".announcement-switches input").click()');
+    check(await evaluate('!document.querySelector(".announcement-switches input").checked'),'the switch toggles off');
+    // An active normal file shows the dialog with bounded dismissal actions; the
+    // fixture rides localStorage so it survives the harness's per-group reload, and
+    // the earlier switch test's stored preference is reset first.
+    await evaluate('localStorage.removeItem("hongguo:announcements:v1")');
+    await evaluate('localStorage.setItem("hongguo:announcements:fixture",JSON.stringify({id:"notice-ui-1",title:"合成公告",body:"第一行",active:true}))');
+    await reset({open:false});await about();
+    await wait('document.querySelector(".announcement-overlay")','the validated file opens the dialog');
+    check(await evaluate('document.querySelector(".announcement-card h2").textContent==="合成公告"'),'the validated title renders');
+    check(await evaluate('document.querySelector(".announcement-tag").textContent==="公告"'),'a normal file is not tagged urgent');
+    check(await evaluate('document.querySelector(".announcement-actions .button").textContent==="今日不再提醒"'),'bounded dismissal actions exist');
+    await screenshot('phone-announcement-dialog.png');
+    await evaluate('document.querySelector(".announcement-actions .button").click()');
+    await wait('!document.querySelector(".announcement-overlay")','the dismissal closes the dialog');
+    // A second load in the same browser stays silenced for the rest of the local day.
+    await reset({open:false});await about();
+    check(await evaluate('!document.querySelector(".announcement-overlay")'),'the day dismissal silences the same file');
+    await evaluate('localStorage.removeItem("hongguo:announcements:fixture");localStorage.removeItem("hongguo:announcements:v1")');
   });
   await group('ISOLATION no browser network, exceptions or unexpected native calls', async () => {
     eq(report.externalRequests,[],'zero external requests');eq(report.pageErrors,[],'zero browser exceptions');eq(await evaluate('window.__seasonFixture.notes'),[],'zero unexpected RPCs');

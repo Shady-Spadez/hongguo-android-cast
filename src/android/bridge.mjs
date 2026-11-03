@@ -2,6 +2,8 @@
 const METHODS = new Set([
   'getInfo', 'httpGet', 'cancelHttp', 'getLibrary', 'getSeriesHistory', 'toggleFavorite', 'play',
   'getAccount', 'officialSendCode', 'officialLoginSMS', 'officialVerifyMFA', 'officialCancelLogin', 'officialLogout', 'officialSync', 'officialImportGuest',
+  'officialWebQrcode', 'officialWebPoll', 'officialWebLogout', 'officialWebCancel', 'getAnnouncements', 'searchNewReleases', 'homeFeed', 'mergeDownloads',
+  'getMergedVideos', 'deleteMergedVideo', 'playMergedVideo',
   'download', 'getDownloads', 'playDownload', 'deleteDownload', 'openExternal',
   'getPlaybackCache', 'clearPlaybackCache',
   'appRequest', 'appRegisteredModel', 'appResolveResult', 'getPlaybackOptions', 'setPlaybackOptions',
@@ -92,6 +94,10 @@ if (typeof window !== 'undefined') {
     const owner = metadata && typeof metadata.owner === 'string' && /^(guest|official:[a-f0-9]{64})$/.test(metadata.owner) ? metadata.owner : undefined;
     window.dispatchEvent(new CustomEvent('androidaccountchanged', { detail: { owner } }));
   };
+  // Electron 壳（contextIsolation）：原生响应经 contextBridge 回调进入页面。
+  // 安卓 JavascriptInterface 没有这些注册函数，可选链直接跳过。
+  try { window.AndroidBridge?.onResponse?.(message => window.__androidResponse(message)); } catch { }
+  try { window.AndroidBridge?.onResume?.(() => window.__androidResume()); } catch { }
 }
 
 export async function requestHtml(url, { timeoutMs = 25000, deadlineMs, signal } = {}) {

@@ -26,13 +26,15 @@ public final class Mp4ConcatTest {
             byte[] entry=new byte[40]; put4(entry,0,entry.length);
             System.arraycopy("avc1".getBytes(StandardCharsets.US_ASCII),0,entry,4,4);
             entry[36]=0x33; entry[37]=0x77;
-            return box("stsd",payload(new byte[8],entry));
+            byte[] head=new byte[8]; put4(head,4,1); // one entry
+            return box("stsd",payload(head,entry));
         }
         private static byte[] audioStsd() throws IOException {
             byte[] entry=new byte[36]; put4(entry,0,entry.length);
             System.arraycopy("mp4a".getBytes(StandardCharsets.US_ASCII),0,entry,4,4);
             entry[32]=0x44; entry[33]=(byte)0xac;
-            return box("stsd",payload(new byte[8],entry));
+            byte[] head=new byte[8]; put4(head,4,1); // one entry
+            return box("stsd",payload(head,entry));
         }
         byte[] build(int seed) throws IOException {
             List<List<Integer>> vChunks=split(videoSizes.length,videoChunks), aChunks=split(audioSizes.length,audioChunks);
@@ -79,9 +81,17 @@ public final class Mp4ConcatTest {
             byte[] minf=box("minf",payload(box(handler.equals("vide")?"vmhd":"smhd",new byte[12]),box("stbl",stbl.toByteArray())));
             ByteArrayOutputStream mdia=new ByteArrayOutputStream(); mdia.write(box("mdhd",mdhd)); mdia.write(hdlr); mdia.write(minf);
             ByteArrayOutputStream trak=new ByteArrayOutputStream(); trak.write(box("tkhd",tkhd));
-            if (editList) trak.write(box("edts",box("elst",payload(new byte[8],new byte[12]))));
+            if (editList) trak.write(box("edts",box("elst",elstBody())));
             trak.write(box("mdia",mdia.toByteArray()));
             return trak.toByteArray();
+        }
+        /** A real edit list: one segment covering the movie duration, starting at media time 40. */
+        private byte[] elstBody() throws IOException {
+            byte[] entry=new byte[12];
+            put4(entry,0,duration); put4(entry,4,40); // segment duration, media time
+            entry[8]=0; entry[9]=1; // media_rate_integer 1
+            ByteArrayOutputStream count=new ByteArrayOutputStream(); put4(count,1); // one entry
+            return payload(new byte[4],count.toByteArray(),entry);
         }
         private byte[] sttsBody(long[] sizes) {
             ByteArrayOutputStream out=new ByteArrayOutputStream(); put4(out,0); put4(out,sizes.length);
@@ -180,6 +190,26 @@ public final class Mp4ConcatTest {
             while (p<stbl.length) { long size=u32(stbl,(int)p); String type=new String(stbl,(int)p+4,4,StandardCharsets.US_ASCII); if (size<8||p+size>stbl.length) throw new IOException("bad stbl child"); if (type.equals("stss")) { byte[] body=Arrays.copyOfRange(stbl,(int)p+8,(int)(p+size)); long count=u32(body,4); long[] out=new long[(int)count]; for (int i=0;i<count;i++) out[i]=u32(body,8+i*4); return out; } p+=size; }
             return null;
         }
+        /** The media times of a track's merged edit list, in order. */
+        long[] elst(int track) throws IOException {
+            byte[] trak=traks.get(track);
+            byte[] edts=child(trak,"edts"); byte[] elst=child(edts,"elst");
+            long count=u32(elst,4); long[] out=new long[(int)count];
+            for (int i=0;i<count;i++) out[i]=u32(elst,8+i*12+4);
+            return out;
+        }
+        /** Entry count of a track's stsd. */
+        long stsdEntries(int track) throws IOException {
+            byte[] stsd=table(track,"stsd");
+            return u32(stsd,4);
+        }
+        /** Every stsc run of a track: {firstChunk, samplesPerChunk, descriptionIndex}. */
+        long[][] stscRuns(int track) throws IOException {
+            byte[] stsc=table(track,"stsc");
+            long runs=u32(stsc,4); long[][] out=new long[(int)runs][];
+            for (int i=0;i<runs;i++) out[i]=new long[]{u32(stsc,8+i*12),u32(stsc,12+i*12),u32(stsc,16+i*12)};
+            return out;
+        }
     }
 
     private static void check(boolean value,String label) { checks++; if (!value) throw new AssertionError(label); }
@@ -218,14 +248,54 @@ public final class Mp4ConcatTest {
             byte[] otherStsd=new byte[40]; put4(otherStsd,0,otherStsd.length);
             System.arraycopy("avc1".getBytes(StandardCharsets.US_ASCII),0,otherStsd,4,4);
             otherStsd[36]=0x11; // different level bytes
-            File stranger=write(directory,"stranger.mp4",new Builder(1000,100,600,250,videoSizes,audioSizes,videoSync,2,2,otherStsd,false).build(9));
+            byte[] strangerBody=new byte[8]; put4(strangerBody,4,1); // one entry
+            byte[] strangerStsd=payload(strangerBody,otherStsd); // full stsd body for the override
+            File stranger=write(directory,"stranger.mp4",new Builder(1000,100,600,250,videoSizes,audioSizes,videoSync,2,2,strangerStsd,false).build(9));
             File incompatible=new File(directory,"incompatible.mp4");
-            reject(()->Mp4Concat.concat(Arrays.asList(a,stranger),incompatible),"different stsd refused");
-            File edited=write(directory,"edited.mp4",new Builder(1000,100,600,250,videoSizes,audioSizes,videoSync,2,2,null,true).build(3));
-            reject(()->Mp4Concat.concat(Arrays.asList(a,edited),incompatible),"edit list refused");
             File otherScale=write(directory,"scale.mp4",new Builder(900,100,600,250,videoSizes,audioSizes,videoSync,2,2,null,false).build(4));
             reject(()->Mp4Concat.concat(Arrays.asList(a,otherScale),incompatible),"timescale mismatch refused");
             check(!incompatible.exists(),"no partial output on refusal");
+
+            // Different encoder settings keep merging: every input stores its own description.
+            File mixed=new File(directory,"mixed.mp4");
+            Mp4Concat.concat(Arrays.asList(a,stranger),mixed);
+            DlnaSessionFile.validate(mixed);
+            Reader mixReader=new Reader(mixed);
+            check(mixReader.stsdEntries(0)==2,"video keeps both sample descriptions (got "+mixReader.stsdEntries(0)+")");
+            check(mixReader.stsdEntries(1)==1,"identical audio stays single-description");
+            long[][] runs=mixReader.stscRuns(0);
+            check(runs.length==2&&runs[0][2]==1&&runs[1][0]==3&&runs[1][2]==2,"chunk descriptions switch at the episode boundary: "+runs.length);
+            verifySampleBytes(mixReader,0,Arrays.asList(a,stranger));
+            verifySampleBytes(mixReader,1,Arrays.asList(a,stranger));
+
+            // Edit lists are chained: each episode keeps its own priming trim.
+            Builder editedBuilder=new Builder(1000,240,600,600,videoSizes,audioSizes,videoSync,2,2,null,true);
+            File editedA=write(directory,"edited-a.mp4",editedBuilder.build(11));
+            File editedB=write(directory,"edited-b.mp4",editedBuilder.build(12));
+            File editedMerged=new File(directory,"edited-merged.mp4");
+            Mp4Concat.concat(Arrays.asList(editedA,editedB),editedMerged);
+            DlnaSessionFile.validate(editedMerged);
+            Reader editedReader=new Reader(editedMerged);
+            check(editedReader.elst(0).length==2,"both edit lists survive the merge");
+            check(editedReader.elst(0)[0]==40,"the first edit keeps its media time");
+            check(editedReader.elst(0)[1]==40+240,"the second edit is shifted by the first episode media");
+            check(editedReader.elst(1).length==2,"the audio track chains its edit list too");
+            check(editedReader.elst(1)[1]==40+320,"the audio shift uses the audio media span");
+            // Edited and edit-less episodes mix: the edit-less one contributes no segment.
+            File plain=write(directory,"plain.mp4",new Builder(1000,240,600,600,videoSizes,audioSizes,videoSync,2,2,null,false).build(13));
+            File mixedEdits=new File(directory,"mixed-edits.mp4");
+            Mp4Concat.concat(Arrays.asList(plain,editedA),mixedEdits);
+            DlnaSessionFile.validate(mixedEdits);
+            Reader mixedEditsReader=new Reader(mixedEdits);
+            check(mixedEditsReader.elst(0).length==1,"the edit-less episode contributes no segment");
+            check(mixedEditsReader.elst(0)[0]==40+240,"the edited episode keeps its priming trim, shifted by the first episode media");
+
+            // A keyframe-table-less episode marks every sample sync for the merged track.
+            File noSync=write(directory,"nosync.mp4",new Builder(1000,240,600,600,videoSizes,audioSizes,null,2,2,null,false).build(14));
+            File mixedSync=new File(directory,"mixed-sync.mp4");
+            Mp4Concat.concat(Arrays.asList(a,noSync),mixedSync);
+            DlnaSessionFile.validate(mixedSync);
+            check(new Reader(mixedSync).stss(0)==null,"mixed sync tables fall back to all-sync");
             System.out.println("MP4_CONCAT_OK checks="+checks+" mergedBytes="+merged.length());
         } finally { delete(directory); }
     }
