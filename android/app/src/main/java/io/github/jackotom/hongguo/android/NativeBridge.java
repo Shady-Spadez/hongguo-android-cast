@@ -34,7 +34,7 @@ final class NativeBridge {
     private final ThreadPoolExecutor searchWorker = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
     // Login/cloud control never occupies source or media request workers.
     private final ThreadPoolExecutor accountWorker = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
-    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest", "officialWebQrcode", "officialWebPoll", "officialWebLogout", "officialWebCancel", "getAnnouncements", "searchNewReleases", "homeFeed", "mergeDownloads", "getMergedVideos", "deleteMergedVideo", "playMergedVideo", "prefetchPlayback"));
+    private static final Set<String> METHODS = new HashSet<>(Arrays.asList("getInfo", "httpGet", "cancelHttp", "appRequest", "appRegisteredModel", "appResolveResult", "getLibrary", "getSeriesHistory", "toggleFavorite", "play", "download", "getDownloads", "deleteDownload", "playDownload", "getPlaybackCache", "clearPlaybackCache", "getPlaybackOptions", "setPlaybackOptions", "getSearchHistory", "addSearchHistory", "removeSearchHistory", "clearSearchHistory", "searchQuery", "openExternal", "getAccount", "officialSendCode", "officialLoginSMS", "officialVerifyMFA", "officialCancelLogin", "officialLogout", "officialSync", "officialImportGuest", "officialWebQrcode", "officialWebPoll", "officialWebLogout", "officialWebCancel", "getAnnouncements", "searchNewReleases", "homeFeed", "mergeDownloads", "getMergedVideos", "deleteMergedVideo", "playMergedVideo", "prefetchPlayback", "followCacheEnqueue", "getFollowCacheStatus", "setFollowCacheEnabled", "clearFollowCache"));
     NativeBridge(MainActivity activity) { this.activity = activity; store = new LibraryStore(activity); downloads = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE); }
     @JavascriptInterface public void postMessage(String message) {
         if (message == null || message.length() > 256 * 1024 || message.getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return;
@@ -450,6 +450,29 @@ final class NativeBridge {
             }
             case "getPlaybackCache": respond(id, PlaybackCache.get(activity).status(), null); break;
             case "clearPlaybackCache": respond(id, PlaybackCache.get(activity).clear(), null); break;
+            case "followCacheEnqueue": {
+                // Followed-series silent cache: the page supplies the episode directory it
+                // already resolved; native stores them one at a time in the background.
+                JSONObject series = LibraryStore.series(params.getJSONObject("series"));
+                Object rawEpisodes = params.opt("episodes");
+                if (rawEpisodes != null && rawEpisodes != JSONObject.NULL && !(rawEpisodes instanceof JSONArray)) throw new JSONException("追剧缓存分集列表无效");
+                JSONArray episodes = params.optJSONArray("episodes");
+                if (episodes == null) throw new JSONException("追剧缓存分集列表无效");
+                if (episodes.length() > 1000) throw new JSONException("追剧缓存单季最多支持 1000 集");
+                JSONObject defaults = PlayerOptions.read(activity);
+                String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : defaults.optString("quality", "auto"));
+                int queued = FollowSeriesCache.get(activity).enqueue(series, episodes, quality);
+                respond(id, new JSONObject().put("queued", queued), null);
+                break;
+            }
+            case "getFollowCacheStatus": respond(id, FollowSeriesCache.get(activity).status(), null); break;
+            case "setFollowCacheEnabled": {
+                if (!(params.opt("enabled") instanceof Boolean)) throw new JSONException("追剧缓存开关无效");
+                FollowSeriesCache.get(activity).setEnabled(params.getBoolean("enabled"));
+                respond(id, FollowSeriesCache.get(activity).status(), null);
+                break;
+            }
+            case "clearFollowCache": respond(id, FollowSeriesCache.get(activity).clear(), null); break;
             case "prefetchPlayback": {
                 // Detail-page background warm-up: stage the episode into the playback cache
                 // before the user presses play, using the same plan/cache the player will

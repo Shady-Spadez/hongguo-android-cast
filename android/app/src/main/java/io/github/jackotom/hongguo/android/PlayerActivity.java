@@ -484,6 +484,9 @@ public final class PlayerActivity extends Activity {
     private static final class PreparedMedia {
         final JSONObject episode, series; final String quality, seriesId; final int ceiling; final PlaybackCache.QueueWindow window; boolean protectedKey;
         Uri uri; String remote, kind; PlaybackSources.Plan plan; boolean manual, cached; java.util.concurrent.Future<?> staging;
+        // Follow-cache reader lease: that file lives outside the playback cache's own
+        // protection, so the key is tracked separately for release.
+        String followVid; int followIndex; String followQuality;
         PreparedMedia(JSONObject series, JSONObject episode, String quality, int ceiling, PlaybackCache.QueueWindow window) { this.ceiling=ceiling; this.series = series; this.seriesId = series.optString("seriesId"); this.episode = episode; this.quality = quality; this.window = window; }
     }
     private synchronized PreparedMedia reserveMedia(JSONObject target, String stageQuality, int ceiling, PlaybackCache.QueueWindow window) throws Exception {
@@ -495,7 +498,11 @@ public final class PlayerActivity extends Activity {
     private synchronized void releasePrepared(PreparedMedia media) {
         if (media == null) return;
         pendingMedia.remove(media);
-        if (media.staging != null) media.staging.cancel(true);
+        if (media.staging != null) { media.staging.cancel(true); FollowSeriesCache.get(this).hold(false); }
+        if (media.followVid != null) {
+            FollowSeriesCache.get(this).release(media.seriesId, media.followVid, media.followIndex, media.followQuality);
+            media.followVid = null;
+        }
         if (media.protectedKey) {
             cache.release(media.seriesId, media.episode.optString("vid"), media.episode.optInt("index"), media.quality, media.ceiling);
             media.protectedKey = false;
@@ -518,7 +525,6 @@ public final class PlayerActivity extends Activity {
         try {
             Uri local = allowDownloads && offline && initialUrl != null ? Uri.parse(initialUrl) : allowDownloads && (offline || "auto".equals(stageQuality)) ? downloaded(target) : null;
             if (recovering) local = null;
-            if (offline && local == null) throw new Exception("这集的手动下载文件已被移除，请返回下载页检查");
             File cached = !recovering && local == null ? cache.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling) : null;
             if (cached != null && StagedMediaCheck.firstSampleProblem(cached) != null) {
                 // An upstream content incident can leave fully-downloaded but scrambled
@@ -526,8 +532,26 @@ public final class PlayerActivity extends Activity {
                 try { cache.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling); } catch (Exception ignored) { }
                 cached = null;
             }
+            boolean followHit = false;
+            if (cached == null && local == null && !recovering && ceiling == 0) {
+                // Followed-series library: the background cacher already stored the whole
+                // episode. Same sample check as the playback cache; a bad file is dropped
+                // and playback simply stages fresh media from the network.
+                FollowSeriesCache follow = FollowSeriesCache.get(this);
+                File followed = follow.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
+                if (followed != null) {
+                    if (StagedMediaCheck.firstSampleProblem(followed) != null) {
+                        try { follow.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality); } catch (Exception ignored) { }
+                    } else {
+                        follow.protect(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
+                        media.followVid = target.optString("vid"); media.followIndex = target.optInt("index"); media.followQuality = stageQuality;
+                        cached = followed; followHit = true;
+                    }
+                }
+            }
+            if (offline && local == null && cached == null) throw new Exception("这集的手动下载文件已被移除，请返回下载页检查");
             if (local != null) { media.uri = local; media.kind = "手动下载 · 本地播放"; media.manual = true; }
-            else if (cached != null) { media.uri = Uri.fromFile(cached); media.kind = "播放缓存 · 本地播放"; media.cached = true; }
+            else if (cached != null) { media.uri = Uri.fromFile(cached); media.kind = followHit ? "追剧缓存 · 本地播放" : "播放缓存 · 本地播放"; media.cached = true; }
             else {
                 if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("播放准备已取消");
                 if (recovering) {
@@ -564,7 +588,13 @@ public final class PlayerActivity extends Activity {
                 // on the cache worker and playback starts from the growing .part once its
                 // head is buffered, instead of waiting for the full episode.
                 final String stageVid = target.optString("vid"); final int stageIndex = target.optInt("index");
-                java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality));
+                // Startup bandwidth belongs to the episode the user just opened: pause the
+                // silent follow-series downloader until this transfer finishes.
+                FollowSeriesCache.get(this).hold(true);
+                java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> {
+                    try { return cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality); }
+                    finally { FollowSeriesCache.get(this).hold(false); }
+                });
                 // CENC plans stage ciphertext and only decrypt in place after the full
                 // transfer: their .part is unreadable, so neither early playback nor the
                 // sample check may touch it — wait for the decrypted final file. Clear
@@ -1081,7 +1111,8 @@ public final class PlayerActivity extends Activity {
             try {
                 if (token != generation || destroyed || !autoplay || castWasActive) return;
                 if (cache.find(sid, following.optString("vid"), following.optInt("index"), targetQuality, targetCeiling) != null
-                        || (targetCeiling == 0 && "auto".equals(targetQuality) && downloaded(following) != null)) return;
+                        || (targetCeiling == 0 && "auto".equals(targetQuality) && downloaded(following) != null)
+                        || (targetCeiling == 0 && FollowSeriesCache.get(this).find(sid, following.optString("vid"), following.optInt("index"), targetQuality) != null)) return;
                 PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, following.optString("vid"), targetQuality, targetCeiling, false, false);
                 if (token == generation && !destroyed && !castWasActive && autoplay && actualQuality.equals(targetQuality)
                         && stageCeiling(actualQuality, automaticCeiling) == targetCeiling) cacheEpisode(sid, following, plan, targetQuality, token);

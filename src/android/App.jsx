@@ -10,6 +10,7 @@ import gplLicense from '../../LICENSE?raw';
 import AccountPanel from './AccountPanel.jsx';
 import UpdatePanel from './UpdatePanel.jsx';
 import { createOfficialSeasonLookup, requestOfficialSeries } from './official-series.mjs';
+import { createFollowCache } from './follow-cache.mjs';
 import { announcementLink, createAnnouncements } from './announcements.mjs';
 import { completedEpisode, filterHistory, withHistoryHints } from './history-view.mjs';
 
@@ -17,6 +18,8 @@ const source = createSource(requestHtml, { fallback: fetchAppPlayUrl,
   searchPage: params => nativeCall('searchQuery', params, 60000),
   newReleases: params => nativeCall('searchNewReleases', params, 30000) });
 const seasonLookup = createOfficialSeasonLookup(requestOfficialSeries, createSeasonLookup((keyword, page) => source.search(keyword, page)));
+// Module-level like the source: the detail page arms it on favorite, the root feeds it libraries.
+const followCache = createFollowCache({ nativeCall, source });
 const EMPTY_LIBRARY = { favorites: [], history: [] };
 const NAV = [
   { id: 'discover', label: '发现', Icon: Home },
@@ -83,7 +86,9 @@ function Poster({ item, onOpen, history }) {
       {item.episodeLabel || item.episodeCount ? <span className="poster-label">{item.episodeLabel || `${item.episodeCount} 集`}</span> : null}
     </span>
     <strong>{item.title || '未命名短剧'}</strong>
-    {history ? <span className="poster-caption">看到第 {history.index} 集 · {timeText(history.positionMs)}</span> : item.tags?.length ? <span className="poster-caption">{item.tags.slice(0, 2).join(' / ')}</span> : null}
+    {history ? <span className="poster-caption">看到第 {history.index} 集 · {timeText(history.positionMs)}</span>
+      : item.cache && Number(item.cache.total) > 0 ? <span className="poster-caption">{`已缓存 ${item.cache.cached}/${item.cache.total}`}</span>
+      : item.tags?.length ? <span className="poster-caption">{item.tags.slice(0, 2).join(' / ')}</span> : null}
     {history?.hint ? <span className="poster-hint">{history.hint}</span> : null}
   </button>;
 }
@@ -379,13 +384,25 @@ function SearchPage({ onOpen }) {
 function Library({ library, error, busy, onRetry, onOpen, onAccount }) {
   const [view, setView] = useState('favorites');
   const [historyView, setHistoryView] = useState('all');
+  const [cacheRows, setCacheRows] = useState(null);
   const items = library[view] || [];
   // Completed means the last episode played near its end; hints only inform, never hide.
   const rows = useMemo(() => {
     const { decorate } = withHistoryHints(library.history || []);
     return (library.history || []).map(decorate);
   }, [library.history]);
-  const shown = view === 'history' ? filterHistory(rows, historyView) : items;
+  // Follow-cache progress on favorite cards; native scans the directory, so poll lightly.
+  useEffect(() => {
+    if (view !== 'favorites') return undefined;
+    let alive = true;
+    const read = () => { nativeCall('getFollowCacheStatus', {}, 10000).then(result => { if (alive) setCacheRows(result?.series && typeof result.series === 'object' ? result.series : null); }).catch(() => {}); };
+    read();
+    const timer = setInterval(read, 15000);
+    window.addEventListener('androidresume', read);
+    return () => { alive = false; clearInterval(timer); window.removeEventListener('androidresume', read); };
+  }, [view, library]);
+  const shown = view === 'history' ? filterHistory(rows, historyView)
+    : cacheRows ? items.map(item => (cacheRows[String(item.seriesId)] ? { ...item, cache: cacheRows[String(item.seriesId)] } : item)) : items;
   const completedCount = useMemo(() => (library.history || []).filter(row => completedEpisode(row)).length, [library.history]);
   return <>
     <header className="page-heading heading-actions"><div><h1>我的追剧</h1><p>本机保留记录；登录红果官方账号后同步收藏、历史和进度。</p></div><button type="button" className="button" onClick={onAccount}>账号</button></header>
@@ -674,20 +691,42 @@ function Downloads({ notify }) {
   </>;
 }
 
-function About({ info, notify, accountFocus, announcementsRef }) {
+function About({ info, notify, accountFocus, announcementsRef, followCache }) {
   const [cache, setCache] = useState({ busy: true });
   const [clearing, setClearing] = useState(false);
+  const [follow, setFollow] = useState({ busy: true });
+  const [followToggling, setFollowToggling] = useState(false);
+  const [followClearing, setFollowClearing] = useState(false);
   const mounted = useRef(true);
   const refreshCache = useCallback(async () => {
     try { const result = await nativeCall('getPlaybackCache'); if (mounted.current) setCache({ ...result, busy: false }); }
     catch (error) { if (mounted.current) setCache((previous) => ({ ...previous, busy: false, error: errorText(error) })); }
   }, []);
-  useEffect(() => { mounted.current = true; refreshCache(); window.addEventListener('androidresume', refreshCache); return () => { mounted.current = false; window.removeEventListener('androidresume', refreshCache); }; }, [refreshCache]);
+  const refreshFollow = useCallback(async () => {
+    try { const result = await nativeCall('getFollowCacheStatus'); if (mounted.current) setFollow({ ...(result || {}), busy: false }); }
+    catch (error) { if (mounted.current) setFollow((previous) => ({ ...previous, busy: false, error: errorText(error) })); }
+  }, []);
+  useEffect(() => { mounted.current = true; refreshCache(); refreshFollow(); window.addEventListener('androidresume', refreshCache); window.addEventListener('androidresume', refreshFollow); return () => { mounted.current = false; window.removeEventListener('androidresume', refreshCache); window.removeEventListener('androidresume', refreshFollow); }; }, [refreshCache, refreshFollow]);
   const clearCache = async () => {
     setClearing(true);
     try { const result = await nativeCall('clearPlaybackCache'); if (mounted.current) { notify(`已清理 ${result.removed || 0} 个播放缓存 · ${byteText(result.bytes)}`); await refreshCache(); } }
     catch (error) { if (mounted.current) setCache((previous) => ({ ...previous, error: errorText(error) })); }
     finally { if (mounted.current) setClearing(false); }
+  };
+  const toggleFollow = async () => {
+    setFollowToggling(true);
+    try {
+      const enabled = follow.enabled !== true;
+      const result = await nativeCall('setFollowCacheEnabled', { enabled });
+      if (mounted.current) { setFollow({ ...(result || {}), busy: false }); notify(enabled ? '追剧自动缓存已开启' : '追剧自动缓存已暂停，已缓存内容仍可播放'); if (enabled && followCache) followCache.resweep(); }
+    } catch (error) { if (mounted.current) notify(errorText(error)); }
+    finally { if (mounted.current) setFollowToggling(false); }
+  };
+  const clearFollow = async () => {
+    setFollowClearing(true);
+    try { const result = await nativeCall('clearFollowCache'); if (mounted.current) { notify(`已清理 ${result.removed || 0} 个追剧缓存 · ${byteText(result.bytes)}`); await refreshFollow(); } }
+    catch (error) { if (mounted.current) notify(errorText(error)); }
+    finally { if (mounted.current) setFollowClearing(false); }
   };
   const external = async (url) => { try { await nativeCall('openExternal', { url }); } catch (error) { notify(errorText(error)); } };
   return <>
@@ -697,6 +736,7 @@ function About({ info, notify, accountFocus, announcementsRef }) {
     <AnnouncementSettings announcementsRef={announcementsRef} notify={notify} />
     <section className="about-section"><h2>应用信息</h2><dl><div><dt>版本</dt><dd>{info.version || '读取中'}</dd></div><div><dt>设备界面</dt><dd>{info.isTv ? 'Android TV / 电视盒子' : 'Android 手机 / 平板'}</dd></div><div><dt>播放方式</dt><dd>安卓原生全屏播放器</dd></div><div><dt>数据存储</dt><dd>本机记录；官方账号同步收藏、历史与进度</dd></div></dl></section>
     <section className="about-section"><h2>播放缓存</h2><p className="cache-status" role="status">{cache.busy ? '正在读取缓存…' : typeof cache.files === 'number' ? `${cache.files} 个文件 · ${byteText(cache.bytes)}${cache.budgetBytes ? ` / 预算 ${byteText(cache.budgetBytes)}` : ''}` : '缓存状态暂未读取'}</p><p className="cache-note">自动清理开启时，保留前 1 集和当前集；本机播放预取下一集，投屏连播时依次预缓存后面 5 集，优先下一集，不等待全部缓存再开播。预取与清理均限于当前季，不自动跨季。普通缓存预算 256 MiB，投屏期间 768 MiB，单集上限 96 MiB；容量不足或取源失败时预缓存可能不足 5 集。更早已看缓存自动释放，手动下载保留，正在供流的文件受保护。</p><div className="about-links"><button className="button" disabled={cache.busy || clearing} onClick={clearCache}>{clearing ? '清理中…' : '清理播放缓存'}</button><button className="button" disabled={clearing} onClick={refreshCache}><RefreshCw />刷新缓存状态</button></div>{cache.error && <p className="text-error" role="alert">{cache.error}</p>}</section>
+    <section className="about-section"><h2>追剧缓存</h2><p className="cache-status" role="status">{follow.busy ? '正在读取追剧缓存…' : typeof follow.files === 'number' ? `${Object.keys(follow.series || {}).length} 部剧 · ${follow.files} 个文件 · ${byteText(follow.bytes)}${follow.budgetBytes ? ` / 预算 ${byteText(follow.budgetBytes)}` : ''}` : '追剧缓存状态暂未读取'}</p><p className="cache-note">「我的追剧」里的剧会在应用打开期间自动逐集缓存（优先未看的集数，正在播放时不抢带宽），播放时直接使用本地文件。分季剧各季一并缓存；超出预算后自动删除最久未看的缓存，手动下载不受影响。暂停后已缓存内容仍可播放。</p><div className="about-links"><button className="button" disabled={follow.busy || followToggling} onClick={toggleFollow}>{followToggling ? '切换中…' : follow.enabled === false ? '开启自动缓存' : '暂停自动缓存'}</button><button className="button" disabled={follow.busy || followClearing} onClick={clearFollow}>{followClearing ? '清理中…' : '清理追剧缓存'}</button><button className="button" disabled={followClearing} onClick={refreshFollow}><RefreshCw />刷新缓存状态</button></div>{follow.error && <p className="text-error" role="alert">{follow.error}</p>}</section>
     <section className="about-section"><h2>使用说明</h2><p>电视可用方向键移动焦点、确认键打开。返回键先关闭详情，再回到发现页；播放器左上角可直接返回选集。</p><p>完整分集都可选择；播放和下载依次尝试网页常规入口、网页备用入口与 App 片源。选集中的「自动取源」不是锁定标志，也不表示所有分集已经验证可播；失败会显示实际原因。</p><p>自动连播默认开启，当前集结束后继续为下一集自动取源；取源失败时保留重试和返回入口。下载完成后，可在「下载」页面离线播放。</p></section>
     <section className="about-section"><h2>开源与许可</h2><p>本应用基于 jackotom/hongguo-drama，遵循 GPL-3.0 许可。安卓适配代码与构建说明随完整项目源码提供，分发修改版时需保留许可与源码。</p><div className="about-links"><button className="button" onClick={() => external('https://github.com/jackotom/hongguo-drama')}><ExternalLink />上游项目</button><button className="button" onClick={() => external('https://www.gnu.org/licenses/gpl-3.0.html')}><ExternalLink />GPL-3.0 许可网页</button></div><details className="license-details"><summary tabIndex={0}>GPL-3.0 许可全文（离线）</summary><pre className="license-text" tabIndex={0} aria-label="GPL-3.0 许可全文，可滚动阅读">{gplLicense}</pre></details></section>
   </>;
@@ -1062,7 +1102,7 @@ function Detail({ seed, initialVid, resumeIntent, library, onBack, onLibrary, no
     if (favoritePending.current || pointError || pointBusy) return;
     const owner = libraryRef.current.owner; favoritePending.current = true;
     setFavoriteBusy(true); setFavoriteError('');
-    try { const result = await nativeCall('toggleFavorite', { series: compactSeries(item) }); if (mounted.current && owner === libraryRef.current.owner && (result.owner === undefined || result.owner === owner)) { setPointEntry(null); onLibrary(result); } }
+    try { const result = await nativeCall('toggleFavorite', { series: compactSeries(item) }); if (mounted.current && owner === libraryRef.current.owner && (result.owner === undefined || result.owner === owner)) { setPointEntry(null); onLibrary(result); if (!isFavorite) followCache.favoriteAdded(compactSeries(item)); } }
     catch (error) { if (mounted.current && owner === libraryRef.current.owner) setFavoriteError(errorText(error)); }
     finally { favoritePending.current = false; if (mounted.current) setFavoriteBusy(false); }
   };
@@ -1359,6 +1399,10 @@ export default function App() {
     };
   }, [loadInfo, loadLibrary]);
   useEffect(() => { document.documentElement.dataset.tv = String(!!info.isTv); }, [info.isTv]);
+  // Followed-series silent cache: enqueue on every library change, then rediscover
+  // new episodes of ongoing shows on a slow interval while the page is around.
+  useEffect(() => { followCache.refresh(library); }, [library]);
+  useEffect(() => { followCache.start(); return undefined; }, []);
   useTvNavigation(!!info.isTv);
   const closeDetail = useCallback(() => { setDetail(null); setTimeout(() => lastDetailFocus.current?.isConnected && lastDetailFocus.current.focus(), 0); }, []);
   const openDetail = (series, vid) => { lastDetailFocus.current = document.activeElement; previousScroll.current = content.current?.scrollTop || 0; setDetail({ seed: series, initialVid: vid }); };
@@ -1397,7 +1441,7 @@ export default function App() {
         {tab === 'search' && <SearchPage onOpen={openDetail} />}
         {tab === 'library' && <Library library={library} error={libraryError} busy={libraryBusy} onRetry={loadLibrary} onOpen={openDetail} onAccount={() => { navigate('about'); setAccountFocus(value => value + 1); }} />}
         {tab === 'downloads' && !detail && <Downloads notify={notify} />}
-        {tab === 'about' && <About info={info} notify={notify} accountFocus={accountFocus} announcementsRef={announcements} />}
+        {tab === 'about' && <About info={info} notify={notify} accountFocus={accountFocus} announcementsRef={announcements} followCache={followCache} />}
       </div>
     </main></div>{notice && <div className="toast" role="status">{notice}</div>}
     {announcement && <AnnouncementDialog announcement={announcement} onClose={closeAnnouncement} />}
