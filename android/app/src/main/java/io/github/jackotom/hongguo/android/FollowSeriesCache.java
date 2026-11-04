@@ -104,6 +104,11 @@ final class FollowSeriesCache {
     }
     void protect(String sid, String vid, int index, String quality) { policy.protect(sid, MediaQuality.cacheVid(vid, quality), index); }
     void release(String sid, String vid, int index, String quality) { policy.release(sid, MediaQuality.cacheVid(vid, quality), index); }
+    /** Drop one bad file found at play time; the network path replaces it. */
+    void invalidate(String sid, String vid, int index, String quality) {
+        try { policy.invalidate(sid, MediaQuality.cacheVid(vid, quality), index); }
+        catch (Exception ignored) { }
+    }
 
     /** Pause the queue while the player itself is fetching the episode the user just opened. */
     void hold(boolean active) {
