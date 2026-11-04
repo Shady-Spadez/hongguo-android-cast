@@ -657,7 +657,7 @@ public final class PlayerActivity extends Activity {
         if (!validPlaybackCallback(token, video)) return;
         cancelPlaybackWatchdogs(); decoderPreparing = false;
         if (!recoverMedia(token, unsupported ? MediaPlayer.MEDIA_ERROR_UNSUPPORTED : 1, 0, reason) && !lowerCurrentMedia(token, reason))
-            playbackError(token, reason + (lastMediaError == null || lastMediaError.equals(reason) ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集");
+            playbackError(token, reason + (lastMediaError == null || lastMediaError.equals(reason) ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集", true);
     }
     private void stageProgress(int token, String stageQuality, int stage, boolean switching) {
         main.post(() -> {
@@ -978,10 +978,13 @@ public final class PlayerActivity extends Activity {
         }
         return null;
     }
-    private void playbackError(int token, String message) {
+    private void playbackError(int token, String message) { playbackError(token, message, false); }
+    /** @param decoderOriginated true only for failures raised by the player itself — source
+     *  resolution and content-poison errors must never burn the one-shot surface rebuild. */
+    private void playbackError(int token, String message, boolean decoderOriginated) {
         if (destroyed || token != generation || isFinishing()) return;
         silentAdvance = false;
-        if (surfaceRecoveryArmed) {
+        if (surfaceRecoveryArmed && decoderOriginated) {
             // hi3751: after many back-to-back episodes the reused surface loses its
             // hi-player video-output handle and every subsequent MediaPlayer start fails
             // with error (1,0); rebuilding the activity surface once restores playback.
