@@ -1,3 +1,4 @@
+import 'core-js/modules/es.global-this';
 import desktopAppSource from '../../native/app-source.js';
 import desktopQuality from '../../native/download-quality.js';
 import { setNativeCall } from './axios-native.mjs';
