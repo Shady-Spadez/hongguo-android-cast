@@ -2,8 +2,6 @@ package io.github.jackotom.hongguo.android;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
 import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -14,7 +12,6 @@ import org.json.JSONObject;
 final class PlayerOptions {
     private static final String FILE = "player_options";
     static final float[] SPEEDS = { .75f, 1f, 1.25f, 1.5f, 2f };
-    private static final Map<MediaPlayer, Float> confirmedSpeeds = Collections.synchronizedMap(new WeakHashMap<>());
     private PlayerOptions() { }
     private static SharedPreferences preferences(Context context) {
         Context app = context.getApplicationContext();
@@ -29,44 +26,6 @@ final class PlayerOptions {
         throw new IllegalArgumentException("倍速仅支持 0.75、1、1.25、1.5 或 2");
     }
     static void validateSpeed(double input) { speed(input); }
-    static float observedSpeed(MediaPlayer player) {
-        try {
-            float result = player.getPlaybackParams().getSpeed();
-            if (Float.isFinite(result) && result > 0) { confirmedSpeeds.put(player, result); return result; }
-            // NuPlayer reports the transport rate 0 while paused. It does not mean that
-            // the selected speed disappeared. Only reuse this same instance's readback,
-            // never the user's unverified preference or a different decoder's value.
-            if (result == 0 && !player.isPlaying()) {
-                Float confirmed = confirmedSpeeds.get(player);
-                return confirmed == null ? Float.NaN : confirmed;
-            }
-            confirmedSpeeds.remove(player); return Float.NaN;
-        } catch (RuntimeException error) { confirmedSpeeds.remove(player); return Float.NaN; }
-    }
-    /** setPlaybackParams may start a paused player; always restore the transport state. */
-    static float setVerifiedSpeed(MediaPlayer player, float requested, boolean playing) throws Exception {
-        requested = speed(requested);
-        float previous = observedSpeed(player);
-        if (!Float.isFinite(previous)) {
-            // A fresh prepared/paused decoder may also report 0 before its first rate
-            // setting. Try the requested rate, but accept it only after positive readback.
-            float raw = player.getPlaybackParams().getSpeed();
-            if (raw != 0 || player.isPlaying()) throw new IllegalStateException("设备未返回实际倍速");
-        }
-        try {
-            player.setPlaybackParams(new PlaybackParams().allowDefaults().setSpeed(requested));
-            // This verification must be a fresh positive read, not the paused-zero cache.
-            float actual = player.getPlaybackParams().getSpeed();
-            if (!Float.isFinite(actual) || actual <= 0 || Math.abs(actual - requested) > .001f) throw new IllegalStateException("设备未接受此倍速");
-            confirmedSpeeds.put(player, actual);
-            if (playing) { if (!player.isPlaying()) player.start(); } else player.pause();
-            return actual;
-        } catch (RuntimeException error) {
-            if (Float.isFinite(previous)) try { player.setPlaybackParams(new PlaybackParams().allowDefaults().setSpeed(previous)); observedSpeed(player); } catch (RuntimeException ignored) { }
-            try { if (playing) { if (!player.isPlaying()) player.start(); } else player.pause(); } catch (RuntimeException ignored) { }
-            throw new IllegalStateException("设备未接受此倍速", error);
-        }
-    }
     static synchronized JSONObject read(Context context) throws JSONException {
         SharedPreferences prefs = preferences(context);
         String selected = "auto"; float rate = 1f; boolean danmaku = false;

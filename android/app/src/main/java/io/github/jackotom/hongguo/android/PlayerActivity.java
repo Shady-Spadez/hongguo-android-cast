@@ -720,6 +720,7 @@ public final class PlayerActivity extends Activity {
                             failCurrentMedia(token, "当前片源实际分辨率不符合 " + qualityLabel(playedQuality) + " 播放档位", false); return;
                         }
                         mediaPlayer = player; prepared = true; completed = false; silentAdvance = false;
+                        synchronized (poisonCounts) { poisonCounts.remove(target.optString("vid")); } // healthy fetch: any earlier poison is forgiven
                         watchProgressSeeks(token, targetView);
                         videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
                         player.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
