@@ -565,7 +565,12 @@ public final class PlayerActivity extends Activity {
                 // head is buffered, instead of waiting for the full episode.
                 final String stageVid = target.optString("vid"); final int stageIndex = target.optInt("index");
                 java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality));
-                File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
+                // CENC plans stage ciphertext and only decrypt in place after the full
+                // transfer: their .part is unreadable, so neither early playback nor the
+                // sample check may touch it — wait for the decrypted final file. Clear
+                // plans keep the progressive head start.
+                boolean encrypted = media.plan.contentKey != null;
+                File ready = encrypted ? staging.get() : awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
                 String sampleProblem = StagedMediaCheck.firstSampleProblem(ready);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
