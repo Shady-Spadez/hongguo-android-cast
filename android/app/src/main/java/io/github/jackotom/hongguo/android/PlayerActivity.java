@@ -100,6 +100,8 @@ public final class PlayerActivity extends Activity {
     private int resumeAt;
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
     private boolean silentAdvance; // auto-advance keeps the HUD hidden end to end
+    private final java.util.HashMap<String,Integer> poisonCounts = new java.util.HashMap<>();
+    static final class MediaContentPoisonedException extends java.io.IOException { MediaContentPoisonedException(String message) { super(message); } }
     private boolean surfaceRecoveryArmed = true;
     private volatile boolean destroyed, autoplay;
     private boolean cleanup, offline;
@@ -569,9 +571,15 @@ public final class PlayerActivity extends Activity {
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
                     // cancel the transfer, and clear the entry so recovery re-fetches.
+                    // After two poisoned fetches for the same episode the incident is
+                    // clearly persistent: fail terminally with the explicit reason
+                    // instead of cycling every quality stage behind a "loading" screen.
                     staging.cancel(true);
                     try { cache.invalidate(media.seriesId, stageVid, stageIndex, stageQuality, ceiling); } catch (Exception ignored) { }
-                    throw new java.io.IOException("红果片源服务异常（" + sampleProblem + "），已清除损坏缓存，请稍后重试");
+                    int poisoned = 0;
+                    synchronized (poisonCounts) { poisoned = poisonCounts.merge(stageVid, 1, Integer::sum); }
+                    if (poisoned >= 2) throw new MediaContentPoisonedException("红果片源服务异常，内容校验已连续失败（" + sampleProblem + "）。已清除损坏缓存，请稍后再试");
+                    throw new java.io.IOException("片源内容损坏（" + sampleProblem + "），已清除缓存并重试");
                 }
                 media.uri = Uri.fromFile(ready); media.kind = "片源已准备 · 缓存播放"; media.cached = true;
                 media.staging = ready.getName().endsWith(".part") ? staging : null;
