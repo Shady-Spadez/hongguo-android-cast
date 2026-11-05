@@ -47,31 +47,6 @@ final class StagedMediaCheck {
         }
     }
 
-    /** Declared video dimensions of the vide track (tkhd width/height), or null when
-     *  unreadable. The hi3751 codec rejects frames whose larger edge exceeds its
-     *  declared 1920 cap (some CDN 1080p variants are 1080x1924), which Media3 turns
-     *  into a hard NoSupport with no codec ever initializing. */
-    static int[] videoSize(File file) {
-        if (file == null || !file.isFile()) return null;
-        RandomAccessFile data = null;
-        try {
-            data = new RandomAccessFile(file, "r");
-            long[] moov = findBox(data, 0, data.length(), "moov");
-            if (moov == null) return null;
-            long[] trak = findBox(data, moov[0] + 8, moov[0] + moov[1], "trak");
-            while (trak != null) {
-                int[] size = trackVideoSize(data, trak);
-                if (size != null) return size;
-                trak = findBox(data, trak[0] + trak[1], moov[0] + moov[1], "trak");
-            }
-            return null;
-        } catch (Exception ignored) {
-            return null;
-        } finally {
-            if (data != null) try { data.close(); } catch (Exception ignored) { }
-        }
-    }
-
     /** Declared video dimensions as Media3 will see them: the MP4 extractor overrides
      *  the container size from the SPS inside hvcC, and the hi3751 codec hard-rejects
      *  frames above its declared 1920 edge. Returns the coded edge, or 0 when unknown. */
