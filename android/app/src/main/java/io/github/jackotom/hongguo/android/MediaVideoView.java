@@ -158,15 +158,13 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                     boolean enableDecoderFallback, android.os.Handler eventHandler,
                     androidx.media3.exoplayer.video.VideoRendererEventListener eventListener,
                     long allowedVideoJoiningTimeMs, java.util.ArrayList<androidx.media3.exoplayer.Renderer> out) {
-                out.add(new androidx.media3.exoplayer.mediacodec.MediaCodecVideoRenderer(
+                out.add(new androidx.media3.exoplayer.video.MediaCodecVideoRenderer(
                     context, mediaCodecSelector, allowedVideoJoiningTimeMs) {
-                    @Override protected int supportsFormat(androidx.media3.common.Format format) {
-                        int support = super.supportsFormat(format);
-                        int mask = support & androidx.media3.common.C.FORMAT_SUPPORT_MASK;
-                        if (mask == androidx.media3.common.C.FORMAT_UNSUPPORTED
+                    @Override protected int getFormatSupport(androidx.media3.common.Format format) {
+                        int support = super.getFormatSupport(format);
+                        if (support == androidx.media3.common.C.FORMAT_UNSUPPORTED
                                 && androidx.media3.common.MimeTypes.VIDEO_H265.equals(format.sampleMimeType))
-                            return androidx.media3.common.C.FORMAT_EXCEEDS_CAPABILITIES
-                                | (support & ~androidx.media3.common.C.FORMAT_SUPPORT_MASK);
+                            return androidx.media3.common.C.FORMAT_EXCEEDS_CAPABILITIES;
                         return support;
                     }
                 });
