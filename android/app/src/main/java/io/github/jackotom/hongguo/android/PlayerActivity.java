@@ -685,9 +685,11 @@ public final class PlayerActivity extends Activity {
     private static String localFileProblem(File file) {
         String problem = StagedMediaCheck.firstSampleProblem(file);
         if (problem != null) return problem;
-        int edge = StagedMediaCheck.codedVideoEdge(file);
-        if (edge > PlaybackSources.MAX_DECODER_EDGE)
-            return String.format(Locale.ROOT, "该 %dp 片源编码尺寸超出本机解码器 %d 上限", edge, PlaybackSources.MAX_DECODER_EDGE);
+        if (!PlaybackSources.ALLOW_OVERSIZED_HEVC) {
+            int edge = StagedMediaCheck.codedVideoEdge(file);
+            if (edge > PlaybackSources.MAX_DECODER_EDGE)
+                return String.format(Locale.ROOT, "该 %dp 片源编码尺寸超出本机解码器 %d 上限", edge, PlaybackSources.MAX_DECODER_EDGE);
+        }
         return null;
     }
     private static int stageCeiling(String quality, int maximumEdge) {

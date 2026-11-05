@@ -210,9 +210,15 @@ final class PlaybackSources {
     }
     /** hi3751 codec ceiling: Media3 rejects any frame whose larger coded edge exceeds the
      *  declared 1920 cap (some CDN 1080p HEVC variants are coded 1080x1924 — a hard
-     *  NoSupport in both orientations, with no codec ever initializing). */
+     *  NoSupport in both orientations, with no codec ever initializing).
+     *  EXPERIMENT: the hardware very likely decodes them fine — the cap is only the OMX
+     *  capability DECLARATION, which MediaVideoView now bypasses with a forced renderer.
+     *  While this is true the dimension gates are disabled; if configure() refuses, set
+     *  false to restore the instant-descent behaviour. */
+    static final boolean ALLOW_OVERSIZED_HEVC = true;
     static final int MAX_DECODER_EDGE = 1920;
     static boolean beyondDecoderEdge(int width, int height) {
+        if (ALLOW_OVERSIZED_HEVC) return false;
         return width > 0 && height > 0 && Math.max(width, Math.max(height, 1)) > MAX_DECODER_EDGE;
     }
     /** Reject plans the device can never decode before any bytes are staged. */
