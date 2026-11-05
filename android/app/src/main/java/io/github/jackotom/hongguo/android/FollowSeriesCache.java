@@ -73,7 +73,15 @@ final class FollowSeriesCache {
         File external = this.context.getExternalFilesDir(null);
         directory = external != null ? new File(external, "follow-cache-v1") : new File(this.context.getCacheDir(), "follow-cache-v1");
         policy = new PlaybackCachePolicy(directory, BUDGET_BYTES, MAX_FILE_BYTES, PlaybackSources::downloadProgressive);
-        enabled = preferences().getBoolean("enabled", true);
+        SharedPreferences prefs = preferences();
+        enabled = prefs.getBoolean("enabled", true);
+        if (prefs.getInt("schema", 1) < 2) {
+            // Schema 2 stores only decoder-decodable tiers (plan-dimension gate). The
+            // previous library may hold 1080p variants the codec hard-rejects (coded
+            // 1080x1924): rebuild it once; the next sweep refills at decodable tiers.
+            try { policy.clear(); } catch (Exception ignored) { }
+            prefs.edit().putInt("schema", 2).remove("registry").apply();
+        }
     }
 
     static synchronized FollowSeriesCache get(Context context) {

@@ -96,9 +96,9 @@ final class StagedMediaCheck {
         }
     }
 
-    /** Media3's own SPS-derived size for a vide track's hvcC (authoritative for what the
-     *  capability query will check), or the stsd entry size as a fallback. */
-    @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
+    /** Container-declared video dimensions of the vide track's sample entry. Media3 may
+     *  override these from the SPS inside hvcC, so an SPS-oversized file can still slip
+     *  through — the plan-dimension gate at resolve time is the authoritative guard. */
     private static int trackVideoEdge(RandomAccessFile data, long[] trak) throws Exception {
         long[] mdia = findBox(data, trak[0] + 8, trak[0] + trak[1], "mdia");
         if (mdia == null) return 0;
@@ -119,20 +119,9 @@ final class StagedMediaCheck {
         if (entry == null) return 0;
         // VisualSampleEntry: 6 reserved + data_ref_index(2) + pre_defined(2) + reserved(2)
         // + pre_defined(12) → width(2), height(2) at body+24/26.
-        int stsdWidth = readUnsignedShort(data, entry[0] + 8 + 24);
-        int stsdHeight = readUnsignedShort(data, entry[0] + 8 + 26);
-        int edge = Math.max(stsdWidth, stsdHeight);
-        long[] hvcC = findBox(data, entry[0] + 8, entry[0] + entry[1], "hvcC");
-        if (hvcC != null && hvcC[1] > 8 && hvcC[1] <= 1 << 20) {
-            byte[] record = new byte[(int) (hvcC[1] - 8)];
-            data.seek(hvcC[0] + 8);
-            data.readFully(record);
-            try {
-                androidx.media3.extractor.mp4.HevcConfig config =
-                    androidx.media3.extractor.mp4.HevcConfig.parse(new androidx.media3.common.util.ParsableByteArray(record));
-                if (config.width > 0 && config.height > 0) edge = Math.max(config.width, config.height);
-            } catch (Exception ignored) { /* Container claims win when the SPS is unreadable. */ }
-        }
+        int width = readUnsignedShort(data, entry[0] + 8 + 24);
+        int height = readUnsignedShort(data, entry[0] + 8 + 26);
+        int edge = Math.max(width, height);
         return edge > 0 && edge <= 16384 ? edge : 0;
     }
 
