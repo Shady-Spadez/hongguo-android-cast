@@ -31,6 +31,8 @@ final class FollowSeriesCache {
     private static final String PREFS = "follow_cache_v1";
     private static final Pattern OWNED = Pattern.compile("([a-f0-9]{64})_([0-9]{1,10})_[a-f0-9]{64}\\.mp4");
     private static final int MAX_FAILURES_PER_EPISODE = 3;
+    /** Storage preference order: the library keeps the best tier a series offers. */
+    private static final String[] TIERS = { "1080p", "720p", "auto" };
 
     private static FollowSeriesCache instance;
 
@@ -97,10 +99,26 @@ final class FollowSeriesCache {
         return added;
     }
 
-    /** Player lookup: the final decrypted file for this episode at this quality, if present. */
+    /** A located follow-cache file plus the quality tier it was stored under. */
+    static final class Entry {
+        final File file; final String quality;
+        Entry(File file, String quality) { this.file = file; this.quality = quality; }
+    }
+
+    /** Player lookup: the final decrypted file for this episode at this exact quality. */
     File find(String sid, String vid, int index, String quality) {
         try { return policy.find(sid, MediaQuality.cacheVid(vid, quality), index); }
         catch (Exception error) { return null; }
+    }
+    /** Automatic playback prefers whatever the library holds, best tier first. An
+     *  explicitly chosen quality keeps using {@link #find} so a manual 720p choice
+     *  is never silently upgraded. */
+    Entry locateBest(String sid, String vid, int index) {
+        for (String quality : TIERS) {
+            File file = find(sid, vid, index, quality);
+            if (file != null) return new Entry(file, quality);
+        }
+        return null;
     }
     void protect(String sid, String vid, int index, String quality) { policy.protect(sid, MediaQuality.cacheVid(vid, quality), index); }
     void release(String sid, String vid, int index, String quality) { policy.release(sid, MediaQuality.cacheVid(vid, quality), index); }
@@ -201,34 +219,41 @@ final class FollowSeriesCache {
     private void process(Item item) {
         try {
             if (cached(item) != null) return;
-            PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(item.sid, item.vid, item.quality, 0, false, false);
-            if (plan.source.equals("web")) {
-                // Same preference as the player: this device renders the App H264 streams
-                // cleanly, so swap a web plan for a fresh App plan when one exists.
-                try { plan = PlaybackSources.resolvePlayback(item.sid, item.vid, item.quality, 0, true, true); }
-                catch (Exception ignored) { }
+            Exception exhaustion = null;
+            for (String quality : TIERS) {
+                try { store(item, quality); return; }
+                catch (InterruptedException interrupted) { throw interrupted; }
+                catch (Exception error) { exhaustion = error; }
             }
-            if (!item.sid.equals(plan.seriesId) || !item.vid.equals(plan.vid)
-                || !MediaQuality.normalize(item.quality).equals(plan.requestedQuality)) {
-                Log.w("FollowCache", "episode identity mismatch, skipped " + item.sid + " #" + item.index);
-                return;
-            }
-            final PlaybackSources.Plan transfer = plan;
-            File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, item.quality), item.index, transfer.url,
-                (value, file, max) -> PlaybackSources.download(transfer, file, max));
-            String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
-            if (problem == null) {
-                synchronized (lock) { failures.remove(item.vid); }
-                return;
-            }
-            policy.invalidate(item.sid, MediaQuality.cacheVid(item.vid, item.quality), item.index);
-            retryOrFail(item, "内容校验失败: " + problem);
+            retryOrFail(item, exhaustion == null || exhaustion.getMessage() == null
+                ? "各清晰度均未取得片源" : exhaustion.getMessage());
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             synchronized (lock) { if (enabled) { pending.addFirst(item); queuedKeys.add(item.key()); } }
-        } catch (Exception error) {
-            retryOrFail(item, error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
         }
+    }
+
+    /** Resolve, download and sample-verify one episode at one quality tier. Any failure throws. */
+    private void store(Item item, String quality) throws Exception {
+        PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(item.sid, item.vid, quality, 0, false, false);
+        if (plan.source.equals("web")) {
+            // Same preference as the player: this device renders the App H264 streams
+            // cleanly, so swap a web plan for a fresh App plan when one exists.
+            try { plan = PlaybackSources.resolvePlayback(item.sid, item.vid, quality, 0, true, true); }
+            catch (Exception ignored) { }
+        }
+        if (!item.sid.equals(plan.seriesId) || !item.vid.equals(plan.vid) || !quality.equals(plan.requestedQuality))
+            throw new java.io.IOException("片源身份不匹配");
+        final PlaybackSources.Plan transfer = plan;
+        File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index, transfer.url,
+            (value, file, max) -> PlaybackSources.download(transfer, file, max));
+        String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
+        if (problem == null) {
+            synchronized (lock) { failures.remove(item.vid); }
+            return;
+        }
+        policy.invalidate(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index);
+        throw new java.io.IOException("内容校验失败: " + problem);
     }
 
     private void retryOrFail(Item item, String reason) {
@@ -244,9 +269,16 @@ final class FollowSeriesCache {
         sleepQuietly(20000);
     }
 
+    /** Already stored at any tier? The library never re-downloads a lower copy of an
+     *  episode it already holds, whatever tier that copy is. */
     private File cached(Item item) {
-        try { return policy.find(item.sid, MediaQuality.cacheVid(item.vid, item.quality), item.index); }
-        catch (Exception error) { return null; }
+        for (String quality : TIERS) {
+            try {
+                File file = policy.find(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index);
+                if (file != null) return file;
+            } catch (Exception ignored) { }
+        }
+        return null;
     }
 
     private boolean metered() {

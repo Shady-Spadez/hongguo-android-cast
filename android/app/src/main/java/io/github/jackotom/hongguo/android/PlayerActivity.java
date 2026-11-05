@@ -536,16 +536,24 @@ public final class PlayerActivity extends Activity {
             if (cached == null && local == null && !recovering && ceiling == 0) {
                 // Followed-series library: the background cacher already stored the whole
                 // episode. Same sample check as the playback cache; a bad file is dropped
-                // and playback simply stages fresh media from the network.
+                // and playback simply stages fresh media from the network. Automatic
+                // playback takes the library's best tier; an explicitly chosen quality
+                // only ever plays its own exact tier.
                 FollowSeriesCache follow = FollowSeriesCache.get(this);
-                File followed = follow.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
-                if (followed != null) {
-                    if (StagedMediaCheck.firstSampleProblem(followed) != null) {
-                        try { follow.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality); } catch (Exception ignored) { }
+                final String followVid = target.optString("vid"); final int followIndex = target.optInt("index");
+                FollowSeriesCache.Entry entry = "auto".equals(stageQuality)
+                    ? follow.locateBest(media.seriesId, followVid, followIndex) : null;
+                if (entry == null) {
+                    File exact = follow.find(media.seriesId, followVid, followIndex, stageQuality);
+                    if (exact != null) entry = new FollowSeriesCache.Entry(exact, stageQuality);
+                }
+                if (entry != null) {
+                    if (StagedMediaCheck.firstSampleProblem(entry.file) != null) {
+                        follow.invalidate(media.seriesId, followVid, followIndex, entry.quality);
                     } else {
-                        follow.protect(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality);
-                        media.followVid = target.optString("vid"); media.followIndex = target.optInt("index"); media.followQuality = stageQuality;
-                        cached = followed; followHit = true;
+                        follow.protect(media.seriesId, followVid, followIndex, entry.quality);
+                        media.followVid = followVid; media.followIndex = followIndex; media.followQuality = entry.quality;
+                        cached = entry.file; followHit = true;
                     }
                 }
             }
@@ -1112,7 +1120,9 @@ public final class PlayerActivity extends Activity {
                 if (token != generation || destroyed || !autoplay || castWasActive) return;
                 if (cache.find(sid, following.optString("vid"), following.optInt("index"), targetQuality, targetCeiling) != null
                         || (targetCeiling == 0 && "auto".equals(targetQuality) && downloaded(following) != null)
-                        || (targetCeiling == 0 && FollowSeriesCache.get(this).find(sid, following.optString("vid"), following.optInt("index"), targetQuality) != null)) return;
+                        || (targetCeiling == 0 && ("auto".equals(targetQuality)
+                            ? FollowSeriesCache.get(this).locateBest(sid, following.optString("vid"), following.optInt("index")) != null
+                            : FollowSeriesCache.get(this).find(sid, following.optString("vid"), following.optInt("index"), targetQuality) != null))) return;
                 PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, following.optString("vid"), targetQuality, targetCeiling, false, false);
                 if (token == generation && !destroyed && !castWasActive && autoplay && actualQuality.equals(targetQuality)
                         && stageCeiling(actualQuality, automaticCeiling) == targetCeiling) cacheEpisode(sid, following, plan, targetQuality, token);

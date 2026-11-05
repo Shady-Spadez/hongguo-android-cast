@@ -27,7 +27,9 @@ export function createFollowCache({ nativeCall, source }) {
       : episodes;
     const compact = { seriesId: detail.seriesId, title: detail.title, coverUrl: detail.coverUrl, episodeCount: detail.episodeCount, episodeLabel: detail.episodeLabel, tags: [] };
     const rows = ordered.map(ep => ({ vid: ep.vid, index: ep.index, webAvailable: !!ep.webAvailable, availability: ep.availability || 'unknown' }));
-    const result = await nativeCall('followCacheEnqueue', { series: compact, episodes: rows }, 60000);
+    // The library keeps the best tier a series offers (native falls back 720p → auto
+    // per episode when 1080p is unavailable); it never follows the live quality setting.
+    const result = await nativeCall('followCacheEnqueue', { series: compact, episodes: rows, quality: '1080p' }, 60000);
     return Number(result?.queued) || 0;
   }
 
