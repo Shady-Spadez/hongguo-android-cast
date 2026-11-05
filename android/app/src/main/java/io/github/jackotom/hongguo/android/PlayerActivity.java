@@ -603,12 +603,10 @@ public final class PlayerActivity extends Activity {
                     try { return cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality); }
                     finally { FollowSeriesCache.get(this).hold(false); }
                 });
-                // CENC plans stage ciphertext and only decrypt in place after the full
-                // transfer: their .part is unreadable, so neither early playback nor the
-                // sample check may touch it — wait for the decrypted final file. Clear
-                // plans keep the progressive head start.
-                boolean encrypted = media.plan.contentKey != null;
-                File ready = encrypted ? staging.get() : awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
+                // CENC plans stage through a decrypting mirror (PlaybackSources.downloadProgressive):
+                // the .part always carries a plaintext head, so encrypted and clear episodes
+                // alike start playback from the first buffered megabytes.
+                File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
                 String sampleProblem = StagedMediaCheck.firstSampleProblem(ready);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but

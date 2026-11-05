@@ -21,7 +21,7 @@ final class PlaybackCache {
         // tree played fine — so the playback cache must live there too.
         File external = context.getApplicationContext().getExternalFilesDir(null);
         File cacheRoot = external != null ? new File(external, "playback-v2") : new File(context.getApplicationContext().getCacheDir(), "playback-v2");
-        policy = new PlaybackCachePolicy(cacheRoot, BUDGET_BYTES, MAX_FILE_BYTES, CAST_BUDGET_BYTES, PlaybackSources::download);
+        policy = new PlaybackCachePolicy(cacheRoot, BUDGET_BYTES, MAX_FILE_BYTES, CAST_BUDGET_BYTES, PlaybackSources::downloadProgressive);
     }
     static synchronized PlaybackCache get(Context context) {
         if (instance == null) instance = new PlaybackCache(context);
@@ -59,8 +59,8 @@ final class PlaybackCache {
     File find(String sid,String vid,int index,String quality) throws Exception { discardLegacyAuto(sid,vid,index,quality); return policy.find(sid,MediaQuality.cacheVid(vid,quality),index); }
     void protect(String sid,String vid,int index,String quality) { policy.protect(sid,MediaQuality.cacheVid(vid,quality),index); }
     void release(String sid,String vid,int index,String quality) { policy.release(sid,MediaQuality.cacheVid(vid,quality),index); }
-    File fetch(String sid,String vid,int index,String url,String quality) throws Exception { discardLegacyAuto(sid,vid,index,quality); return policy.fetch(sid,MediaQuality.cacheVid(vid,quality),index,url,(value,file,max)->PlaybackSources.download(value,file,max,quality)); }
-    File fetchForeground(String sid,String vid,int index,String url,String quality) throws Exception { discardLegacyAuto(sid,vid,index,quality); return policy.fetchForeground(sid,MediaQuality.cacheVid(vid,quality),index,url,(value,file,max)->PlaybackSources.download(value,file,max,quality)); }
+    File fetch(String sid,String vid,int index,String url,String quality) throws Exception { discardLegacyAuto(sid,vid,index,quality); return policy.fetch(sid,MediaQuality.cacheVid(vid,quality),index,url,(value,file,max)->PlaybackSources.downloadProgressive(value,file,max,quality)); }
+    File fetchForeground(String sid,String vid,int index,String url,String quality) throws Exception { discardLegacyAuto(sid,vid,index,quality); return policy.fetchForeground(sid,MediaQuality.cacheVid(vid,quality),index,url,(value,file,max)->PlaybackSources.downloadProgressive(value,file,max,quality)); }
     void invalidate(String sid,String vid,int index,String quality) throws Exception { policy.invalidate(sid,MediaQuality.cacheVid(vid,quality),index); }
     static String playbackCacheVid(String vid,String quality,int ceiling) {
         if(ceiling<0||ceiling>16384)throw new IllegalArgumentException("播放缓存清晰度边界无效");
@@ -75,12 +75,12 @@ final class PlaybackCache {
     File fetch(String sid,String vid,int index,PlaybackSources.Plan plan,String quality) throws Exception {
         if(plan==null||!MediaQuality.normalize(quality).equals(plan.requestedQuality)||!sid.equals(plan.seriesId)||!vid.equals(plan.vid))throw new IllegalArgumentException("播放缓存片源身份或清晰度不匹配");
         discardLegacyAuto(sid,vid,index,quality);
-        return policy.fetch(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index,plan.url,(value,file,max)->PlaybackSources.download(plan,file,max));
+        return policy.fetch(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index,plan.url,(value,file,max)->PlaybackSources.downloadProgressive(plan,file,max));
     }
     File fetchForeground(String sid,String vid,int index,PlaybackSources.Plan plan,String quality) throws Exception {
         if(plan==null||!MediaQuality.normalize(quality).equals(plan.requestedQuality)||!sid.equals(plan.seriesId)||!vid.equals(plan.vid))throw new IllegalArgumentException("播放缓存片源身份或清晰度不匹配");
         discardLegacyAuto(sid,vid,index,quality);
-        return policy.fetchForeground(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index,plan.url,(value,file,max)->PlaybackSources.download(plan,file,max));
+        return policy.fetchForeground(sid,playbackCacheVid(vid,quality,plan.playbackCeiling),index,plan.url,(value,file,max)->PlaybackSources.downloadProgressive(plan,file,max));
     }
     File stagingPart(String sid,String vid,int index,PlaybackSources.Plan plan,String quality) {
         if(plan==null) return null;

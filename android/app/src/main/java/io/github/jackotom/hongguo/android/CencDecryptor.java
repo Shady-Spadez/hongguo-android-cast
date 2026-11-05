@@ -19,6 +19,8 @@ final class CencDecryptor {
     private static final long MAX_FILE = 96L * 1024 * 1024;
     private final RandomAccessFile file;
     private final long length;
+    /** Growing mode: mdat sample offsets may point beyond the staged head (progressive mirror). */
+    private final boolean growing;
     private int boxes, subsamples;
     private final List<Box> mdats = new ArrayList<>(), erase = new ArrayList<>();
     private final List<Sample> allSamples = new ArrayList<>(), encrypted = new ArrayList<>();
@@ -39,7 +41,10 @@ final class CencDecryptor {
     }
     private static IOException invalid(String reason) { return new IOException("CENC_INVALID: " + reason); }
     private static IOException unsupported(String reason) { return new IOException("CENC_UNSUPPORTED: " + reason); }
-    private CencDecryptor(RandomAccessFile file) throws IOException { this.file = file; length = file.length(); }
+    private CencDecryptor(RandomAccessFile file) throws IOException { this(file, false); }
+    private CencDecryptor(RandomAccessFile file, boolean growing) throws IOException {
+        this.file = file; this.growing = growing; length = file.length();
+    }
     static void decryptInPlace(File input, byte[] key) throws Exception {
         if (input == null || key == null || key.length != 16) throw invalid("AES-128 key or temporary file");
         byte[] privateKey = key.clone();
@@ -48,6 +53,51 @@ final class CencDecryptor {
             decoder.plan(); // No file writes until every box, sample and auxiliary record is validated.
             decoder.decrypt(privateKey);
             file.getFD().sync();
+        } finally { Arrays.fill(privateKey, (byte) 0); }
+    }
+
+    /**
+     * Progressive mirror for CENC staging: ciphertext arrives in {@code cipherFile} while
+     * another thread transfers it; this follower republishes a byte-identical decrypted
+     * image into {@code plainFile} as bytes become available, so playback can start from
+     * the plaintext head long before the transfer completes. {@code finished} reports the
+     * transfer's terminal state; a restarted transfer (shrinking cipher file) resets the
+     * mirror. Throws only when the completed file is not a supported CENC container.
+     */
+    static void decryptMirror(File cipherFile, File plainFile, byte[] key, java.util.function.BooleanSupplier finished) throws Exception {
+        if (cipherFile == null || plainFile == null || key == null || key.length != 16) throw invalid("AES-128 key or mirror files");
+        byte[] privateKey = key.clone();
+        try (RandomAccessFile cipher = new RandomAccessFile(cipherFile, "r");
+             RandomAccessFile plain = new RandomAccessFile(plainFile, "rw")) {
+            CencDecryptor decoder = null;
+            long published = 0;
+            plain.setLength(0);
+            for (;;) {
+                long staged = cipherFile.length();
+                if (staged < published) {
+                    // The transfer restarted on the same temporary file: rebuild from zero.
+                    decoder = null; published = 0; plain.setLength(0);
+                }
+                boolean done = finished.getAsBoolean();
+                if (decoder == null && staged >= 24) {
+                    try {
+                        CencDecryptor candidate = new CencDecryptor(cipher, true);
+                        candidate.plan(); // Moov must be staged; mdat may still be arriving.
+                        decoder = candidate;
+                    } catch (IOException notReady) {
+                        // A settled file that still fails the plan is truncated or an
+                        // unsupported container; the caller falls back to full decryption.
+                        if (done) throw notReady;
+                    }
+                }
+                if (decoder != null) published = decoder.mirror(plain, staged, privateKey);
+                if (done && decoder != null && published >= cipherFile.length()) break;
+                Thread.sleep(120);
+            }
+            if (plain.length() != cipherFile.length()) throw invalid("mirror length mismatch");
+            plain.getFD().sync();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt(); throw invalid("mirror cancelled");
         } finally { Arrays.fill(privateKey, (byte) 0); }
     }
     private void bounds(long position, long size, long end) throws IOException {
@@ -83,7 +133,7 @@ final class CencDecryptor {
     }
     private List<Box> nested(Box parent) throws IOException { return children(parent.body, parent.end); }
     private void plan() throws Exception {
-        if (length < 24 || length > MAX_FILE) throw invalid("file size limit");
+        if (length < 24 || !growing && length > MAX_FILE) throw invalid("file size limit");
         List<Box> top = children(0, length);
         if (one(top, "moof", false) != null) throw unsupported("fragmented MP4");
         Box moov = one(top, "moov", true);
@@ -202,13 +252,14 @@ final class CencDecryptor {
             if (first[i] < 1 || first[i] > chunks || i == 0 && first[i] != 1 || i > 0 && first[i] <= first[i - 1] || perChunk[i] < 1 || desc < 1 || desc > descriptions) throw invalid("sample/chunk mapping");
         }
         List<Sample> result = new ArrayList<>(count); int map = 0, sample = 0;
+        long sampleLimit = growing ? Long.MAX_VALUE : length; // Progressive: mdat may still be arriving.
         for (int chunk = 1; chunk <= chunks; chunk++) {
             while (map + 1 < mappings && first[map + 1] <= chunk) map++;
             long at = chunkBox.body + 8 + (long) (chunk - 1) * width;
             long offset = width == 8 ? u64(at, chunkBox.end) : u32(at, chunkBox.end);
             for (int j = 0; j < perChunk[map]; j++) {
                 if (sample >= count) throw invalid("too many mapped samples");
-                int size = sizes[sample++]; bounds(offset, size, length);
+                int size = sizes[sample++]; bounds(offset, size, sampleLimit);
                 if (!insideMdat(offset, size)) throw invalid("sample outside mdat");
                 result.add(new Sample(offset, size)); offset += size;
             }
@@ -288,6 +339,95 @@ final class CencDecryptor {
         return at;
     }
     private static void interrupted() throws IOException { if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("CENC_CANCELLED"); }
+
+    /** A small container rewrite the mirror publishes instead of copying: the sample-entry
+     *  fourcc (encv/enca → original codec) and erased encryption boxes (→ free + zeros). */
+    private static final class Patch {
+        final long start, end; final byte[] head;
+        Patch(long start, long end, byte[] head) { this.start = start; this.end = end; this.head = head; }
+    }
+
+    /** Extend the plaintext mirror with everything staged so far. Box bytes and unprotected
+     *  samples copy verbatim, encrypted samples decrypt, container patches apply in passing.
+     *  Publishing is strictly contiguous, so the mirror's length is always playable head. */
+    private long mirror(RandomAccessFile plain, long staged, byte[] key) throws Exception {
+        List<Patch> patches = new ArrayList<>();
+        for (Description description : descriptions)
+            patches.add(new Patch(description.entry.start + 4, description.entry.start + 8, description.codec.getBytes(StandardCharsets.US_ASCII)));
+        for (Box box : erase)
+            patches.add(new Patch(box.start + 4, box.end, "free".getBytes(StandardCharsets.US_ASCII)));
+        patches.sort(Comparator.comparingLong(value -> value.start));
+        SecretKeySpec aes = new SecretKeySpec(key, "AES");
+        byte[] buffer = new byte[32 * 1024], output = new byte[32 * 1024 + 16], zeros = new byte[32 * 1024];
+        long at = plain.length();
+        int patchAt = 0, sampleAt = 0;
+        while (patchAt < patches.size() && patches.get(patchAt).end <= at) patchAt++;
+        while (sampleAt < allSamples.size() && (allSamples.get(sampleAt).size == 0 || allSamples.get(sampleAt).offset + allSamples.get(sampleAt).size <= at)) sampleAt++;
+        while (at < staged) {
+            interrupted();
+            Patch patch = patchAt < patches.size() ? patches.get(patchAt) : null;
+            Sample sample = sampleAt < allSamples.size() ? allSamples.get(sampleAt) : null;
+            if (sample != null && sample.size == 0) { sampleAt++; continue; }
+            if (patch != null && patch.start == at) {
+                plain.seek(at); plain.write(patch.head);
+                for (long zero = at + patch.head.length; zero < patch.end; ) {
+                    int n = (int) Math.min(zeros.length, patch.end - zero); plain.write(zeros, 0, n); zero += n;
+                }
+                at = patch.end; patchAt++; continue;
+            }
+            if (sample != null && sample.offset == at) {
+                if (at + sample.size > staged) break; // Wait for the remainder of this sample.
+                mirrorSample(plain, sample, aes, buffer, output);
+                at += sample.size; sampleAt++; continue;
+            }
+            long next = staged;
+            if (patch != null && patch.start > at && patch.start < next) next = patch.start;
+            if (sample != null && sample.offset > at && sample.offset < next) next = sample.offset;
+            if (next <= at) break;
+            plain.seek(at);
+            for (long remaining = next - at; remaining > 0; ) {
+                interrupted();
+                int n = (int) Math.min(buffer.length, remaining);
+                file.seek(at); file.readFully(buffer, 0, n);
+                plain.write(buffer, 0, n); at += n; remaining -= n;
+            }
+        }
+        return at;
+    }
+
+    private void mirrorSample(RandomAccessFile plain, Sample sample, SecretKeySpec aes, byte[] buffer, byte[] output) throws Exception {
+        if (sample.iv == null) { copyToMirror(plain, sample.offset, sample.size, buffer); return; }
+        Cipher ctr = Cipher.getInstance("AES/CTR/NoPadding");
+        ctr.init(Cipher.DECRYPT_MODE, aes, new IvParameterSpec(sample.iv));
+        long at = sample.offset;
+        if (sample.clear == null) { mirrorCrypt(ctr, plain, at, sample.size, buffer, output); return; }
+        for (int i = 0; i < sample.clear.length; i++) {
+            if (sample.clear[i] > 0) copyToMirror(plain, at, sample.clear[i], buffer);
+            at += sample.clear[i];
+            if (sample.cipher[i] > 0) mirrorCrypt(ctr, plain, at, sample.cipher[i], buffer, output);
+            at += sample.cipher[i];
+        }
+    }
+
+    private void copyToMirror(RandomAccessFile plain, long offset, int length, byte[] buffer) throws IOException {
+        plain.seek(offset);
+        for (long remaining = length; remaining > 0; ) {
+            int n = (int) Math.min(buffer.length, remaining);
+            file.seek(offset); file.readFully(buffer, 0, n);
+            plain.write(buffer, 0, n); offset += n; remaining -= n;
+        }
+    }
+
+    private void mirrorCrypt(Cipher ctr, RandomAccessFile plain, long offset, int length, byte[] buffer, byte[] output) throws Exception {
+        int remaining = length;
+        while (remaining > 0) {
+            interrupted(); int n = Math.min(buffer.length, remaining);
+            file.seek(offset); file.readFully(buffer, 0, n);
+            int written = ctr.update(buffer, 0, n, output, 0);
+            if (written != n) throw invalid("unsupported AES-CTR provider buffering");
+            plain.seek(offset); plain.write(output, 0, written); offset += n; remaining -= n;
+        }
+    }
     private void decrypt(byte[] key) throws Exception {
         byte[] buffer = new byte[32 * 1024], output = new byte[32 * 1024 + 16];
         SecretKeySpec aes = new SecretKeySpec(key, "AES");

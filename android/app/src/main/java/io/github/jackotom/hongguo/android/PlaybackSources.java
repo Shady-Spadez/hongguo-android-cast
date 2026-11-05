@@ -382,8 +382,25 @@ final class PlaybackSources {
         }
         download(plan,destination,maxBytes);
     }
+    static void downloadProgressive(String url,File destination,long maxBytes) throws Exception {
+        downloadProgressive(url,destination,maxBytes,"auto");
+    }
+    static void downloadProgressive(String url,File destination,long maxBytes,String quality) throws Exception {
+        String requestedQuality=MediaQuality.normalize(quality);
+        Plan plan=find(url,requestedQuality);
+        if (plan==null) {
+            if (!requestedQuality.equals("auto")) throw new IOException("指定清晰度的片源准备信息已过期，请重新取源");
+            if (AppTransport.domain(new URI(url).getHost(),"qznovelvod.com","fqnovelvod.com","douyinvod.com")) throw new IOException("App片源准备信息已过期，请重新取源");
+            NetworkGuard.download(url,destination,maxBytes); return;
+        }
+        downloadProgressive(plan,destination,maxBytes);
+    }
     /** Captured playback plans cannot be replaced by another job's URL/quality registration. */
     static void download(Plan plan,File destination,long maxBytes) throws Exception {
+        transfer(plan,destination,maxBytes,true);
+    }
+    /** Transfer only; the caller owns decryption. Returns the candidate that succeeded. */
+    private static Plan transfer(Plan plan,File destination,long maxBytes,boolean decryptWhenComplete) throws Exception {
         if(plan==null)throw new IllegalArgumentException("播放片源准备信息无效");
         String requestedQuality=MediaQuality.normalize(plan.requestedQuality);
         Exception last=null;
@@ -402,11 +419,11 @@ final class PlaybackSources {
                         ++transfers;
                         NetworkGuard.download(candidate.url,destination,maxBytes,candidate.userAgent,requestReferer);
                         transferred=true;
-                        if(candidate.contentKey!=null) {
-                            byte[] key=new byte[16];for(int i=0;i<16;i++)key[i]=(byte)Integer.parseInt(candidate.contentKey.substring(i*2,i*2+2),16);
+                        if(decryptWhenComplete&&candidate.contentKey!=null) {
+                            byte[] key=contentKey(candidate.contentKey);
                             try { CencDecryptor.decryptInPlace(destination,key); } finally { Arrays.fill(key,(byte)0); }
                         }
-                        return;
+                        return candidate;
                     } catch(Exception error) {
                         if(destination.exists() && !destination.delete()) throw new IOException("未完成的视频清理未成功");
                         if(cancelled(error)) throw error;
@@ -442,6 +459,61 @@ final class PlaybackSources {
         String addressChange=refreshes==0?"":current.url.equals(plan.url)?"，主地址未变化":"，主地址已变化";
         throw new IOException("App片源准备未成功："+(last==null?"请重试":last.getMessage())+
             "（"+requestedQuality+"，已重新取源"+refreshes+"次，媒体尝试"+transfers+"次"+addressChange+"）",last);
+    }
+    private static byte[] contentKey(String hex) throws IOException {
+        if (hex==null || hex.length()!=32) throw new IOException("CENC 密钥无效");
+        byte[] key=new byte[16];
+        for(int i=0;i<16;i++)key[i]=(byte)Integer.parseInt(hex.substring(i*2,i*2+2),16);
+        return key;
+    }
+    /** Progressive CENC staging: ciphertext transfers to a sibling temporary file while a
+     *  follower mirror-publishes the decrypted image into {@code destination}, so playback
+     *  can start from the plaintext head long before the whole episode has arrived. Clear
+     *  plans (and rare wrong-key winner cases) fall back to the plain full-transfer path. */
+    static void downloadProgressive(Plan plan,File destination,long maxBytes) throws Exception {
+        if (plan==null) throw new IllegalArgumentException("播放片源准备信息无效");
+        if (plan.contentKey==null) { download(plan,destination,maxBytes); return; }
+        File cipher=new File(destination.getParentFile(),destination.getName()+".cipher");
+        if (cipher.exists() && !cipher.delete()) throw new IOException("未完成的加密临时文件清理未成功");
+        final java.util.concurrent.atomic.AtomicBoolean done=new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicReference<Throwable> mirrorFailure=new java.util.concurrent.atomic.AtomicReference<>();
+        final byte[] mirrorKey=contentKey(plan.contentKey);
+        Thread follower=new Thread(() -> {
+            try { CencDecryptor.decryptMirror(cipher,destination,mirrorKey,done::get); }
+            catch (Throwable error) { mirrorFailure.compareAndSet(null,error); }
+            finally { Arrays.fill(mirrorKey,(byte)0); }
+        },"cenc-mirror");
+        follower.setDaemon(true);
+        try {
+            follower.start();
+            Plan winner=transfer(plan,cipher,maxBytes,false);
+            done.set(true);
+            follower.join(45000);
+            if (follower.isAlive()) { follower.interrupt(); follower.join(5000); }
+            boolean mirrored=mirrorFailure.get()==null
+                && winner.contentKey!=null && winner.contentKey.equals(plan.contentKey)
+                && destination.isFile() && cipher.isFile() && destination.length()==cipher.length();
+            if (mirrored) return;
+            // Fallback: a clear or differently-keyed candidate won, or the container is not
+            // progressively decryptable. Discard the mirror and publish the settled file.
+            if (destination.exists() && !destination.delete()) throw new IOException("未完成的视频清理未成功");
+            if (winner.contentKey!=null) {
+                byte[] key=contentKey(winner.contentKey);
+                try { CencDecryptor.decryptInPlace(cipher,key); } finally { Arrays.fill(key,(byte)0); }
+            }
+            copyFile(cipher,destination);
+        } finally {
+            done.set(true);
+            if (follower.isAlive()) follower.interrupt();
+            if (cipher.exists()) cipher.delete();
+        }
+    }
+    private static void copyFile(File source,File destination) throws Exception {
+        try (java.io.FileInputStream input=new java.io.FileInputStream(source); java.io.FileOutputStream output=new java.io.FileOutputStream(destination)) {
+            byte[] buffer=new byte[32*1024];
+            for (int n;(n=input.read(buffer))>0;) output.write(buffer,0,n);
+            output.getFD().sync();
+        }
     }
     private static boolean hasDnsCause(Exception error) {
         Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<Throwable,Boolean>());

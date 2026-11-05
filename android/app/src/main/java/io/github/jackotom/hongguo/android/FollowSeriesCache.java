@@ -62,7 +62,7 @@ final class FollowSeriesCache {
         // directory keeps the two stores and their budgets fully independent.
         File external = this.context.getExternalFilesDir(null);
         directory = external != null ? new File(external, "follow-cache-v1") : new File(this.context.getCacheDir(), "follow-cache-v1");
-        policy = new PlaybackCachePolicy(directory, BUDGET_BYTES, MAX_FILE_BYTES, PlaybackSources::download);
+        policy = new PlaybackCachePolicy(directory, BUDGET_BYTES, MAX_FILE_BYTES, PlaybackSources::downloadProgressive);
         enabled = preferences().getBoolean("enabled", true);
     }
 
@@ -246,7 +246,7 @@ final class FollowSeriesCache {
             throw new java.io.IOException("片源身份不匹配");
         final PlaybackSources.Plan transfer = plan;
         File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index, transfer.url,
-            (value, file, max) -> PlaybackSources.download(transfer, file, max));
+            (value, file, max) -> PlaybackSources.downloadProgressive(transfer, file, max));
         String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
         if (problem == null) {
             synchronized (lock) { failures.remove(item.vid); }
