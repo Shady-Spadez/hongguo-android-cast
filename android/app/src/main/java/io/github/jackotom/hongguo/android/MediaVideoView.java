@@ -142,6 +142,54 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if (player == null && source != null) open();
     }
 
+    /**
+     * EXPERIMENT: the hi3751 OMX configure stage hangs when handed a declared size above
+     * its 1920 edge (CDN 1080p variants coded 1080x1924), even though the hardware decodes
+     * the bitstream fine at 1920. Clamps only the configure() declaration — the codec
+     * still decodes per the SPS and outputs what it outputs.
+     */
+    @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
+    private static androidx.media3.exoplayer.DefaultRenderersFactory clampedHevcRenderers(Context context) {
+        return new androidx.media3.exoplayer.DefaultRenderersFactory(context) {
+            @Override protected void buildVideoRenderers(Context context, int extensionRendererMode,
+                    androidx.media3.exoplayer.mediacodec.MediaCodecSelector mediaCodecSelector,
+                    boolean enableDecoderFallback, android.os.Handler eventHandler,
+                    androidx.media3.exoplayer.video.VideoRendererEventListener eventListener,
+                    long allowedVideoJoiningTimeMs, java.util.ArrayList<androidx.media3.exoplayer.Renderer> out) {
+                out.add(new ClampedHevcVideoRenderer(context, mediaCodecSelector, allowedVideoJoiningTimeMs));
+            }
+        };
+    }
+
+    @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
+    private static final class ClampedHevcVideoRenderer extends androidx.media3.exoplayer.video.MediaCodecVideoRenderer {
+        ClampedHevcVideoRenderer(Context context, androidx.media3.exoplayer.mediacodec.MediaCodecSelector selector, long allowedJoiningTimeMs) {
+            super(context, selector, allowedJoiningTimeMs);
+        }
+
+        @Override protected android.media.MediaFormat getMediaFormat(androidx.media3.common.Format format,
+                String codecMimeType, androidx.media3.exoplayer.mediacodec.MediaCodecUtil.CodecMaxValues codecMaxValues,
+                float codecOperatingRate, boolean deviceNeedsNoPostProcessWorkaround, int tunnelingAudioSessionId) {
+            android.media.MediaFormat mediaFormat = super.getMediaFormat(format, codecMimeType, codecMaxValues,
+                codecOperatingRate, deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
+            if (androidx.media3.common.MimeTypes.VIDEO_H265.equals(codecMimeType)
+                    && mediaFormat.containsKey(android.media.MediaFormat.KEY_WIDTH)
+                    && mediaFormat.containsKey(android.media.MediaFormat.KEY_HEIGHT)) {
+                int width = mediaFormat.getInteger(android.media.MediaFormat.KEY_WIDTH);
+                int height = mediaFormat.getInteger(android.media.MediaFormat.KEY_HEIGHT);
+                if (Math.max(width, height) > PlaybackSources.MAX_DECODER_EDGE) {
+                    mediaFormat.setInteger(android.media.MediaFormat.KEY_WIDTH, Math.min(width, PlaybackSources.MAX_DECODER_EDGE));
+                    mediaFormat.setInteger(android.media.MediaFormat.KEY_HEIGHT, Math.min(height, PlaybackSources.MAX_DECODER_EDGE));
+                    if (mediaFormat.containsKey(android.media.MediaFormat.KEY_MAX_WIDTH))
+                        mediaFormat.setInteger(android.media.MediaFormat.KEY_MAX_WIDTH, Math.min(mediaFormat.getInteger(android.media.MediaFormat.KEY_MAX_WIDTH), PlaybackSources.MAX_DECODER_EDGE));
+                    if (mediaFormat.containsKey(android.media.MediaFormat.KEY_MAX_HEIGHT))
+                        mediaFormat.setInteger(android.media.MediaFormat.KEY_MAX_HEIGHT, Math.min(mediaFormat.getInteger(android.media.MediaFormat.KEY_MAX_HEIGHT), PlaybackSources.MAX_DECODER_EDGE));
+                }
+            }
+            return mediaFormat;
+        }
+    }
+
     @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { }
 
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
@@ -158,7 +206,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             if (staging != null) awaitStagedHead(source.getPath(), 768 * 1024);
             patchHevcLevelClaim(source.getPath());
         }
-        ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
+        ExoPlayer fresh = new ExoPlayer.Builder(getContext(), clampedHevcRenderers(getContext())).build();
         fresh.setVideoSurface(surface);
         if (staging != null && "file".equals(source.getScheme()))
             fresh.setMediaSource(new ProgressiveMediaSource.Factory(() -> new GrowingFileDataSource(new java.io.File(source.getPath()), staging)).createMediaSource(MediaItem.fromUri(source)));
