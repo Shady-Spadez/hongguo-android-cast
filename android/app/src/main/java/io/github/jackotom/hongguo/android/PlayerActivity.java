@@ -859,7 +859,13 @@ public final class PlayerActivity extends Activity {
         float confirmed = mediaPlayer == null ? Float.NaN : mediaPlayer.playbackSpeed();
         if (!Float.isFinite(confirmed)) confirmed = actualSpeed;
         if (Float.isFinite(confirmed)) requestedSpeed = confirmed;
-        try { cache.invalidate(owner(episode).optString("seriesId"), episode.optString("vid"), episode.optInt("index"), actualQuality, protectedCeiling); }
+        try {
+            // The failing file may live in either store; drop it wherever it is so the
+            // descent does not re-hit the same bad bytes on every future visit.
+            if (followCurrentVid != null && followCurrentVid.equals(episode.optString("vid")))
+                FollowSeriesCache.get(this).invalidate(followCurrentSeriesId, followCurrentVid, followCurrentIndex, followCurrentQuality);
+            cache.invalidate(owner(episode).optString("seriesId"), episode.optString("vid"), episode.optInt("index"), actualQuality, protectedCeiling);
+        }
         catch (Exception error) { return false; }
         // Decoder/size failures move only down. Carry a consumed reconnect allowance across every stage.
         recoveryBudget.take(token, false, false, false);
@@ -987,7 +993,13 @@ public final class PlayerActivity extends Activity {
         if (job.observedShortEdge > 0) lowerCeiling = Math.min(lowerCeiling, job.observedShortEdge - 1);
         job.ceiling = job.ceiling <= 0 ? lowerCeiling : Math.min(job.ceiling, lowerCeiling);
         job.observedShortEdge = 0;
-        try { cache.invalidate(job.media.seriesId, job.episode.optString("vid"), job.episode.optInt("index"), job.media.quality, job.media.ceiling); }
+        try {
+            // Same-store cleanup as the playback path: a follow-cache file that fails to
+            // decode must not be re-served on the next visit.
+            if (job.media.followVid != null && job.media.followVid.equals(job.episode.optString("vid")))
+                FollowSeriesCache.get(this).invalidate(job.media.seriesId, job.media.followVid, job.media.followIndex, job.media.followQuality);
+            cache.invalidate(job.media.seriesId, job.episode.optString("vid"), job.episode.optInt("index"), job.media.quality, job.media.ceiling);
+        }
         catch (Exception error) { return false; }
         if (job.timeout != null) main.removeCallbacks(job.timeout);
         if (job.view != null) job.view.setOnSeekCompleteListener(null);

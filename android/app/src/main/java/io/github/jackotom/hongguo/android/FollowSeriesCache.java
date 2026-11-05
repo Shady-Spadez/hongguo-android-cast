@@ -59,6 +59,8 @@ final class FollowSeriesCache {
 
     /** A fully transferred file whose decrypted content failed the sample check. */
     static final class ContentCheckException extends java.io.IOException { ContentCheckException(String message) { super(message); } }
+    /** The player's own fetch needs the link; the item requeues without counting. */
+    static final class YieldException extends java.io.IOException { YieldException() { super("追剧缓存让路播放取源"); } }
 
     private FollowSeriesCache(Context context) {
         Context app = context.getApplicationContext();
@@ -80,10 +82,11 @@ final class FollowSeriesCache {
 
     /** Add a series' episodes (already ordered by watching priority by the page). Skips
      *  episodes already cached; a no-op while disabled. Returns how many were queued. */
-    int enqueue(JSONObject series, JSONArray episodes, String quality) throws JSONException {
+    int enqueue(JSONObject series, JSONArray episodes, String quality, JSONArray favorites) throws JSONException {
         JSONObject clean = LibraryStore.series(series);
         String sid = clean.getString("seriesId");
         String normalized = MediaQuality.normalize(quality);
+        pruneRegistry(favorites); // Stale rows for unfollowed series outlive their display value.
         int added = 0, stamp;
         synchronized (lock) {
             if (!enabled) return 0;
@@ -102,6 +105,23 @@ final class FollowSeriesCache {
         }
         if (added > 0) registerSeries(clean, episodes.length(), normalized); // Disk write outside the queue lock.
         return added;
+    }
+
+    /** Registry rows are display-only; drop rows for series no longer followed. Files
+     *  stay and age out through the LRU budget. A null list prunes nothing. */
+    private void pruneRegistry(JSONArray favorites) {
+        if (favorites == null) return;
+        try {
+            JSONObject registry = readRegistry();
+            boolean changed = false;
+            for (Iterator<String> ids = registry.keys(); ids.hasNext();) {
+                String sid = ids.next();
+                boolean found = false;
+                for (int i = 0; i < favorites.length(); i++) if (favorites.optString(i, "").equals(sid)) { found = true; break; }
+                if (!found) { ids.remove(); changed = true; }
+            }
+            if (changed) preferences().edit().putString("registry", registry.toString()).apply();
+        } catch (Exception ignored) { }
     }
 
     /** A located follow-cache file plus the quality tier it was stored under. */
@@ -230,6 +250,12 @@ final class FollowSeriesCache {
                 try { store(item, quality); return; }
                 catch (InterruptedException interrupted) { throw interrupted; }
                 catch (Exception error) {
+                    if (error instanceof YieldException) {
+                        // The player's own fetch owns the link right now; come back later
+                        // without burning a failure slot.
+                        synchronized (lock) { if (enabled && item.epoch == epoch) { pending.addFirst(item); queuedKeys.add(item.key()); } }
+                        return;
+                    }
                     countFailure(item, error); // Every full download counts toward the cap.
                     // A corrupt source is tier-independent; descending only re-downloads garbage.
                     if (error instanceof ContentCheckException) break;
@@ -255,7 +281,12 @@ final class FollowSeriesCache {
             throw new java.io.IOException("片源身份不匹配");
         final PlaybackSources.Plan transfer = plan;
         File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index, transfer.url,
-            (value, file, max) -> PlaybackSources.downloadProgressive(transfer, file, max));
+            (value, file, max) -> {
+                // Yield late arrivals too: the player may have asked for the link after the
+                // worker's own hold check but before this transfer started.
+                if (holds > 0) throw new YieldException();
+                PlaybackSources.downloadProgressive(transfer, file, max);
+            });
         String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
         if (problem == null) {
             synchronized (lock) { failures.remove(item.vid); }

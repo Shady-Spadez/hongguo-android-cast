@@ -16,11 +16,14 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function createFollowCache({ nativeCall, source }) {
   let sweeping = false;
+  let rerunAfterSweep = false;
   let latest = null;
   let lastSweepAt = 0;
   let lastFavoritesKey = '';
 
-  async function enqueueSeries(seriesId, lastWatchedIndex) {
+  /** `known` carries the follow list (and, during a sweep, sibling seasons) so native can
+   *  prune display rows for unfollowed series. Absent for immediate single-series adds. */
+  async function enqueueSeries(seriesId, lastWatchedIndex, known) {
     const detail = await source.detail(seriesId);
     const episodes = Array.isArray(detail?.episodes) ? detail.episodes.filter(ep => SERIES_ID.test(ep.vid)) : [];
     if (!episodes.length) return 0;
@@ -32,13 +35,16 @@ export function createFollowCache({ nativeCall, source }) {
     const rows = ordered.map(ep => ({ vid: ep.vid, index: ep.index, webAvailable: !!ep.webAvailable, availability: ep.availability || 'unknown' }));
     // The library keeps the best tier a series offers (native falls back 720p → auto
     // per episode when 1080p is unavailable); it never follows the live quality setting.
-    const result = await nativeCall('followCacheEnqueue', { series: compact, episodes: rows, quality: '1080p' }, 60000);
+    const params = { series: compact, episodes: rows, quality: '1080p' };
+    if (known) params.favorites = Array.from(known);
+    const result = await nativeCall('followCacheEnqueue', params, 60000);
+    if (known) known.add(seriesId);
     return Number(result?.queued) || 0;
   }
 
   /** A followed multi-season show means the whole story: cache playable siblings too.
    *  Season listing is best-effort and never blocks the followed season itself. */
-  async function enqueueSiblings(seed) {
+  async function enqueueSiblings(seed, known) {
     let queued = 0;
     if (!seed.multiSeason) return queued;
     try {
@@ -46,7 +52,7 @@ export function createFollowCache({ nativeCall, source }) {
       const items = Array.isArray(seasons?.items) ? seasons.items : [];
       for (const season of items) {
         if (!season || season.seriesId === seed.seriesId || season.upcoming || !season.playable) continue;
-        try { queued += await enqueueSeries(season.seriesId, 0); } catch { /* Try the remaining seasons. */ }
+        try { queued += await enqueueSeries(season.seriesId, 0, known); } catch { /* Try the remaining seasons. */ }
         await sleep(SERIES_STAGGER_MS);
       }
     } catch { /* Sibling seasons are optional. */ }
@@ -54,7 +60,12 @@ export function createFollowCache({ nativeCall, source }) {
   }
 
   async function sweep(library, force = false) {
-    if (sweeping) return;
+    if (sweeping) {
+      // An account switch or favorite change landed mid-sweep: the running pass covers
+      // the old library; make sure the new one gets its own pass right after.
+      rerunAfterSweep = true;
+      return;
+    }
     const favorites = Array.isArray(library?.favorites) ? library.favorites : [];
     if (!favorites.length) return;
     sweeping = true;
@@ -77,18 +88,23 @@ export function createFollowCache({ nativeCall, source }) {
       const favoritesKey = ordered.map(series => String(series.seriesId)).join(',');
       if (!force && Date.now() - lastSweepAt < SWEEP_THROTTLE_MS && favoritesKey === lastFavoritesKey) return;
       // Every explicitly followed season first — the user's own list outranks seasons
-      // inferred from a multi-season family — then the inferred siblings.
+      // inferred from a multi-season family — then the inferred siblings. Both passes
+      // share the known-set so registry pruning keeps followed series and siblings.
+      const known = new Set(ordered.map(series => String(series.seriesId)));
       for (const series of ordered) {
-        try { await enqueueSeries(series.seriesId, lastWatch.get(String(series.seriesId)) || 0); }
+        try { await enqueueSeries(series.seriesId, lastWatch.get(String(series.seriesId)) || 0, known); }
         catch { /* Individual series retry on the next sweep. */ }
         await sleep(SERIES_STAGGER_MS);
       }
       for (const series of ordered) {
-        try { await enqueueSiblings(series); } catch { /* Siblings are optional. */ }
+        try { await enqueueSiblings(series, known); } catch { /* Siblings are optional. */ }
         await sleep(SERIES_STAGGER_MS);
       }
       lastSweepAt = Date.now(); lastFavoritesKey = favoritesKey;
-    } finally { sweeping = false; }
+    } finally {
+      sweeping = false;
+      if (rerunAfterSweep && latest) { rerunAfterSweep = false; sweep(latest, true).catch(() => {}); }
+    }
   }
 
   return {

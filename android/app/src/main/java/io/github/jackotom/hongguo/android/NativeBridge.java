@@ -77,7 +77,7 @@ final class NativeBridge {
                     AccountSync.get().requireCurrent(favoriteSelection);
                 } catch (Exception error) { respond(id, null, "账号正在切换，请稍后重试收藏"); return; }
             } else { favoriteSelection = null; favoriteStore = null; }
-            ThreadPoolExecutor executor = method.startsWith("official") ? accountWorker : method.equals("searchQuery") || method.equals("searchNewReleases") || method.equals("homeFeed") ? searchWorker : method.equals("download") ? downloadWorker : worker;
+            ThreadPoolExecutor executor = method.startsWith("official") ? accountWorker : method.equals("searchQuery") || method.equals("searchNewReleases") || method.equals("homeFeed") ? searchWorker : method.equals("download") || method.equals("prefetchPlayback") ? downloadWorker : worker;
             try { executor.execute(() -> { try (AutoCloseable updateLease = (method.equals("download") || method.equals("playDownload")) ? UpdateInstallCheckpoint.operation() : null) { handle(id, method, params, favoriteStore, favoriteSelection); } catch (Exception error) { respond(id, null, error.getMessage() == null ? "操作未成功，请重试" : error.getMessage()); } }); }
             catch (RejectedExecutionException error) { respond(id, null, "请求较多，请稍后重试"); }
         });
@@ -461,7 +461,11 @@ final class NativeBridge {
                 if (episodes.length() > 1000) throw new JSONException("追剧缓存单季最多支持 1000 集");
                 JSONObject defaults = PlayerOptions.read(activity);
                 String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : defaults.optString("quality", "auto"));
-                int queued = FollowSeriesCache.get(activity).enqueue(series, episodes, quality);
+                Object rawFavorites = params.opt("favorites");
+                if (rawFavorites != null && rawFavorites != JSONObject.NULL && !(rawFavorites instanceof JSONArray)) throw new JSONException("追剧缓存收藏列表无效");
+                JSONArray favorites = params.optJSONArray("favorites");
+                if (favorites != null && favorites.length() > 400) favorites = null; // Display pruning, not a data path.
+                int queued = FollowSeriesCache.get(activity).enqueue(series, episodes, quality, favorites);
                 respond(id, new JSONObject().put("queued", queued), null);
                 break;
             }
@@ -485,6 +489,11 @@ final class NativeBridge {
                 String quality = MediaQuality.normalize(params.opt("quality") instanceof String ? (String) params.opt("quality") : defaults.optString("quality", "auto"));
                 PlaybackCache cache = PlaybackCache.get(activity);
                 if (cache.find(sid, vid, index, quality, 0) != null) { respond(id, new JSONObject().put("cached", true), null); break; }
+                // Followed-series library: the episode is usually already stored; warming
+                // the small playback cache would re-download it for nothing.
+                FollowSeriesCache follow = FollowSeriesCache.get(activity);
+                if (("auto".equals(quality) ? follow.locateBest(sid, vid, index) : null) != null
+                        || follow.find(sid, vid, index, quality) != null) { respond(id, new JSONObject().put("cached", true), null); break; }
                 PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, false, false);
                 if (plan.source.equals("web")) { try { plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, true, true); } catch (Exception ignored) { } }
                 java.io.File ready = cache.fetch(sid, vid, index, plan, quality);

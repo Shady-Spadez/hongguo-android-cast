@@ -321,8 +321,9 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             int levelOffset = boxStart + 4 + 12; // general_level_idc within hvcC payload
             if (levelOffset < boxEnd && (buffer[levelOffset] & 0xff) > 123) {
                 buffer[levelOffset] = (byte) 120;
-                file.seek(levelOffset);
-                file.write(buffer[levelOffset]);
+                // A decrypting mirror may have truncated the staging file after the read;
+                // writing past its current length would punch a zero hole into it.
+                if (file.length() > levelOffset) { file.seek(levelOffset); file.write(buffer[levelOffset]); }
             }
             // The SPS NAL inside the hvcC arrays repeats the level inside its
             // profile_tier_level — with this encoder the zero run carries three
@@ -336,8 +337,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                 int level = buffer[i + 10] & 0xff;
                 if (level > 123) {
                     buffer[i + 10] = (byte) 120;
-                    file.seek(i + 10);
-                    file.write(buffer[i + 10]);
+                    if (file.length() > i + 10) { file.seek(i + 10); file.write(buffer[i + 10]); }
                 }
             }
         } catch (Exception ignored) {
