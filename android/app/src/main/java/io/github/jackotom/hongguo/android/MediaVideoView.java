@@ -168,7 +168,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         }
 
         @Override protected android.media.MediaFormat getMediaFormat(androidx.media3.common.Format format,
-                String codecMimeType, androidx.media3.exoplayer.mediacodec.MediaCodecUtil.CodecMaxValues codecMaxValues,
+                String codecMimeType, androidx.media3.exoplayer.video.MediaCodecVideoRenderer.CodecMaxValues codecMaxValues,
                 float codecOperatingRate, boolean deviceNeedsNoPostProcessWorkaround, int tunnelingAudioSessionId) {
             android.media.MediaFormat mediaFormat = super.getMediaFormat(format, codecMimeType, codecMaxValues,
                 codecOperatingRate, deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
