@@ -9,6 +9,7 @@ import { completedEpisode } from './history-view.mjs';
 import { requestOfficialSeries } from './official-series.mjs';
 
 const REFRESH_MS = 30 * 60 * 1000;
+const SWEEP_THROTTLE_MS = 10 * 60 * 1000;
 const SERIES_STAGGER_MS = 2000;
 const SERIES_ID = /^\d{1,30}$/;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -16,6 +17,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function createFollowCache({ nativeCall, source }) {
   let sweeping = false;
   let latest = null;
+  let lastSweepAt = 0;
+  let lastFavoritesKey = '';
 
   async function enqueueSeries(seriesId, lastWatchedIndex) {
     const detail = await source.detail(seriesId);
@@ -69,6 +72,10 @@ export function createFollowCache({ nativeCall, source }) {
         .filter(item => item && SERIES_ID.test(String(item.seriesId)) && !completed.has(String(item.seriesId)))
         .sort((a, b) => (watchedAt.get(String(b.seriesId)) || Number(b.favoriteAt) || 0)
           - (watchedAt.get(String(a.seriesId)) || Number(a.favoriteAt) || 0));
+      // Library refreshes fire on every resume; an unchanged follow list within the
+      // throttle window needs no new episode discovery — the 30-minute timer covers it.
+      const favoritesKey = ordered.map(series => String(series.seriesId)).join(',');
+      if (Date.now() - lastSweepAt < SWEEP_THROTTLE_MS && favoritesKey === lastFavoritesKey) return;
       // Every explicitly followed season first — the user's own list outranks seasons
       // inferred from a multi-season family — then the inferred siblings.
       for (const series of ordered) {
@@ -80,6 +87,7 @@ export function createFollowCache({ nativeCall, source }) {
         try { await enqueueSiblings(series); } catch { /* Siblings are optional. */ }
         await sleep(SERIES_STAGGER_MS);
       }
+      lastSweepAt = Date.now(); lastFavoritesKey = favoritesKey;
     } finally { sweeping = false; }
   }
 
@@ -96,6 +104,10 @@ export function createFollowCache({ nativeCall, source }) {
     favoriteAdded(series) {
       if (!series || !SERIES_ID.test(String(series.seriesId))) return;
       (async () => {
+        try {
+          const status = await nativeCall('getFollowCacheStatus', {}, 10000);
+          if (status?.enabled === false) return;
+        } catch { /* Enqueue is a no-op natively while disabled. */ }
         await enqueueSeries(series.seriesId, 0);
         await enqueueSiblings(series);
       })().catch(() => {});

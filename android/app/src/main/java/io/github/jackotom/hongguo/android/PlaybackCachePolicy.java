@@ -237,7 +237,13 @@ final class PlaybackCachePolicy {
         if (!initialized) {
             File[] entries = directory.listFiles();
             if (entries == null) throw new IOException("读取播放缓存失败");
-            for (File file : entries) if (OWNED.matcher(file.getName()).matches() && file.getName().endsWith(".part") && withinDirectory(file) && file.isFile()) delete(file);
+            for (File file : entries) {
+                if (!file.isFile() || !withinDirectory(file)) continue;
+                String name = file.getName();
+                // Leftover staging from a killed process: interrupted .part transfers and
+                // the ciphertext side files of interrupted decrypting mirrors.
+                if (OWNED.matcher(name).matches() && name.endsWith(".part") || name.endsWith(".cipher")) delete(file);
+            }
             initialized = true;
         }
     }

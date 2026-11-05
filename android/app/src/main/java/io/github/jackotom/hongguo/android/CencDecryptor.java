@@ -67,18 +67,22 @@ final class CencDecryptor {
     static void decryptMirror(File cipherFile, File plainFile, byte[] key, java.util.function.BooleanSupplier finished) throws Exception {
         if (cipherFile == null || plainFile == null || key == null || key.length != 16) throw invalid("AES-128 key or mirror files");
         byte[] privateKey = key.clone();
-        try (RandomAccessFile cipher = new RandomAccessFile(cipherFile, "r");
-             RandomAccessFile plain = new RandomAccessFile(plainFile, "rw")) {
+        RandomAccessFile cipher = new RandomAccessFile(cipherFile, "r");
+        RandomAccessFile plain = new RandomAccessFile(plainFile, "rw");
+        try {
             CencDecryptor decoder = null;
             long published = 0;
             plain.setLength(0);
             for (;;) {
                 long staged = cipherFile.length();
                 if (staged < published) {
-                    // The transfer restarted on the same temporary file: rebuild from zero.
+                    // The transfer restarted on the same temporary path: the old handle
+                    // reads a deleted inode. Rebuild the mirror on the new file.
                     decoder = null; published = 0; plain.setLength(0);
+                    cipher.close(); cipher = new RandomAccessFile(cipherFile, "r");
                 }
                 boolean done = finished.getAsBoolean();
+                if (done && staged < 24) throw invalid("加密传输为空");
                 if (decoder == null && staged >= 24) {
                     try {
                         CencDecryptor candidate = new CencDecryptor(cipher, true);
@@ -98,10 +102,16 @@ final class CencDecryptor {
             plain.getFD().sync();
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt(); throw invalid("mirror cancelled");
-        } finally { Arrays.fill(privateKey, (byte) 0); }
+        } finally {
+            try { cipher.close(); } catch (IOException ignored) { }
+            try { plain.close(); } catch (IOException ignored) { }
+            Arrays.fill(privateKey, (byte) 0);
+        }
     }
     private void bounds(long position, long size, long end) throws IOException {
-        if (position < 0 || size < 0 || position > end || size > end - position || end > length) throw invalid("box/sample bounds");
+        // Long.MAX_VALUE marks growing-mode sample ranges whose media data has not
+        // arrived yet; every other range must lie inside the file as staged.
+        if (position < 0 || size < 0 || position > end || size > end - position || end != Long.MAX_VALUE && end > length) throw invalid("box/sample bounds");
     }
     private long u32(long position, long end) throws IOException { bounds(position, 4, end); file.seek(position); return file.readInt() & 0xffffffffL; }
     private long u64(long position, long end) throws IOException { bounds(position, 8, end); file.seek(position); long n = file.readLong(); if (n < 0) throw invalid("64-bit offset overflow"); return n; }
@@ -120,7 +130,14 @@ final class CencDecryptor {
             if (size == 1) { size = u64(start + 8, end); header = 16; }
             else if (size == 0) size = end - start;
             if (size < header) throw invalid("box size");
-            bounds(start, size, end);
+            if (start + size > end) {
+                // Growing parse: the only box allowed to run past the staged head is the
+                // still-arriving media data; accept its declared extent and stop there.
+                // Anything else incomplete means moov has not fully arrived — retry later.
+                if (!growing || !type.equals("mdat")) throw invalid("box bounds");
+                result.add(new Box(start, start + size, start + header, type));
+                return result;
+            }
             result.add(new Box(start, start + size, start + header, type)); start += size;
         }
         return result;

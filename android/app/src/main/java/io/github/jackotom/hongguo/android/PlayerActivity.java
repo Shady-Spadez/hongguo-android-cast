@@ -93,6 +93,8 @@ public final class PlayerActivity extends Activity {
     private PlaybackCache cache;
     private JSONObject series, episode, queueSeries, protectedEpisode;
     private String queueIdentity = "", protectedSeriesId = "";
+    // Follow-cache lease of the adopted episode; released with the playback lease.
+    private String followCurrentVid; private int followCurrentIndex; private String followCurrentQuality, followCurrentSeriesId;
     private volatile PlaybackCache.QueueWindow localWindow;
     private PlaybackCache.QueueWindow protectedWindow;
     private final List<JSONObject> queue = new ArrayList<>();
@@ -474,6 +476,10 @@ public final class PlayerActivity extends Activity {
         if (activeWindow != null && activeWindow != captured) activeWindow.prune();
     }
     private synchronized void releaseCurrent() {
+        if (followCurrentVid != null) {
+            FollowSeriesCache.get(this).release(followCurrentSeriesId, followCurrentVid, followCurrentIndex, followCurrentQuality);
+            followCurrentVid = null; followCurrentSeriesId = ""; followCurrentQuality = ""; followCurrentIndex = 0;
+        }
         if (protectedCurrent && protectedEpisode != null) {
             cache.release(protectedSeriesId, protectedEpisode.optString("vid"), protectedEpisode.optInt("index"), protectedQuality, protectedCeiling);
             protectedCurrent = false; protectedEpisode = null; protectedSeriesId = "";
@@ -484,6 +490,8 @@ public final class PlayerActivity extends Activity {
     private static final class PreparedMedia {
         final JSONObject episode, series; final String quality, seriesId; final int ceiling; final PlaybackCache.QueueWindow window; boolean protectedKey;
         Uri uri; String remote, kind; PlaybackSources.Plan plan; boolean manual, cached; java.util.concurrent.Future<?> staging;
+        /** Exactly-once release of the follow-queue hold taken by this media's staging. */
+        java.util.concurrent.atomic.AtomicBoolean holdReleased;
         // Follow-cache reader lease: that file lives outside the playback cache's own
         // protection, so the key is tracked separately for release.
         String followVid; int followIndex; String followQuality;
@@ -498,7 +506,11 @@ public final class PlayerActivity extends Activity {
     private synchronized void releasePrepared(PreparedMedia media) {
         if (media == null) return;
         pendingMedia.remove(media);
-        if (media.staging != null) { media.staging.cancel(true); FollowSeriesCache.get(this).hold(false); }
+        if (media.staging != null) {
+            media.staging.cancel(true);
+            // A queued-but-never-run staging task never reached its own finally.
+            if (media.holdReleased != null && media.holdReleased.compareAndSet(false, true)) FollowSeriesCache.get(this).hold(false);
+        }
         if (media.followVid != null) {
             FollowSeriesCache.get(this).release(media.seriesId, media.followVid, media.followIndex, media.followQuality);
             media.followVid = null;
@@ -516,6 +528,10 @@ public final class PlayerActivity extends Activity {
         releaseCurrent(); pendingMedia.remove(media);
         protectedQuality = media.quality; protectedCeiling = media.ceiling; protectedCurrent = media.protectedKey;
         protectedEpisode = media.episode; protectedSeriesId = media.seriesId; protectedWindow = media.window; media.protectedKey = false;
+        if (media.followVid != null) {
+            followCurrentVid = media.followVid; followCurrentIndex = media.followIndex; followCurrentQuality = media.followQuality; followCurrentSeriesId = media.seriesId;
+            media.followVid = null;
+        }
         actualQuality = media.quality; automaticCeiling = media.ceiling;
     }
     private PreparedMedia prepareMedia(JSONObject target, String stageQuality, String initialUrl, boolean recovering, boolean failedWeb, boolean allowDownloads, int maximumEdge, PlaybackCache.QueueWindow window) throws Exception {
@@ -597,12 +613,16 @@ public final class PlayerActivity extends Activity {
                 // head is buffered, instead of waiting for the full episode.
                 final String stageVid = target.optString("vid"); final int stageIndex = target.optInt("index");
                 // Startup bandwidth belongs to the episode the user just opened: pause the
-                // silent follow-series downloader until this transfer finishes.
+                // silent follow-series downloader until this transfer finishes. The flag
+                // keeps the release exactly-once across the task's finally and cancellation.
                 FollowSeriesCache.get(this).hold(true);
+                final java.util.concurrent.atomic.AtomicBoolean holdReleased = new java.util.concurrent.atomic.AtomicBoolean(false);
+                media.holdReleased = holdReleased;
                 java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> {
                     try { return cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality); }
-                    finally { FollowSeriesCache.get(this).hold(false); }
+                    finally { if (holdReleased.compareAndSet(false, true)) FollowSeriesCache.get(this).hold(false); }
                 });
+                media.staging = staging;
                 // CENC plans stage through a decrypting mirror (PlaybackSources.downloadProgressive):
                 // the .part always carries a plaintext head, so encrypted and clear episodes
                 // alike start playback from the first buffered megabytes.

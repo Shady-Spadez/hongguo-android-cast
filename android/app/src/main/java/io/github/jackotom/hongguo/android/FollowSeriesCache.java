@@ -48,12 +48,17 @@ final class FollowSeriesCache {
     private boolean enabled;
     private volatile int holds;
     private Thread worker;
+    /** Bumped by clear(); queued items from an older epoch are dropped, not re-downloaded. */
+    private int epoch;
 
     static final class Item {
-        final String sid, vid, quality; final int index;
-        Item(String sid, String vid, int index, String quality) { this.sid = sid; this.vid = vid; this.index = index; this.quality = quality; }
+        final String sid, vid, quality; final int index; final int epoch;
+        Item(String sid, String vid, int index, String quality, int epoch) { this.sid = sid; this.vid = vid; this.index = index; this.quality = quality; this.epoch = epoch; }
         String key() { return sid + ":" + vid + ":" + index + ":" + quality; }
     }
+
+    /** A fully transferred file whose decrypted content failed the sample check. */
+    static final class ContentCheckException extends java.io.IOException { ContentCheckException(String message) { super(message); } }
 
     private FollowSeriesCache(Context context) {
         Context app = context.getApplicationContext();
@@ -79,23 +84,23 @@ final class FollowSeriesCache {
         JSONObject clean = LibraryStore.series(series);
         String sid = clean.getString("seriesId");
         String normalized = MediaQuality.normalize(quality);
-        int added = 0;
+        int added = 0, stamp;
         synchronized (lock) {
             if (!enabled) return 0;
+            stamp = epoch;
             for (int i = 0; i < episodes.length() && pending.size() < 4000; i++) {
                 JSONObject episode;
                 try { episode = LibraryStore.episode(episodes.getJSONObject(i)); }
                 catch (JSONException invalid) { continue; }
-                Item item = new Item(sid, episode.getString("vid"), episode.getInt("index"), normalized);
+                String vid = episode.getString("vid");
+                if (givenUp(vid)) continue; // Already poisoned this process; retry next app session.
+                Item item = new Item(sid, vid, episode.getInt("index"), normalized, stamp);
                 if (queuedKeys.contains(item.key()) || cached(item) != null) continue;
                 pending.addLast(item); queuedKeys.add(item.key()); added++;
             }
-            if (added > 0) {
-                registerSeries(clean, episodes.length(), normalized);
-                startWorkerLocked();
-                lock.notifyAll();
-            }
+            if (added > 0) { startWorkerLocked(); lock.notifyAll(); }
         }
+        if (added > 0) registerSeries(clean, episodes.length(), normalized); // Disk write outside the queue lock.
         return added;
     }
 
@@ -174,8 +179,8 @@ final class FollowSeriesCache {
     }
 
     JSONObject clear() throws Exception {
-        synchronized (lock) { pending.clear(); queuedKeys.clear(); lock.notifyAll(); }
-        preferences().edit().remove("registry").commit();
+        synchronized (lock) { pending.clear(); queuedKeys.clear(); epoch++; lock.notifyAll(); }
+        preferences().edit().remove("registry").apply();
         PlaybackCachePolicy.Stats stats = policy.clear();
         return new JSONObject().put("removed", stats.removed).put("bytes", stats.bytes);
     }
@@ -203,6 +208,7 @@ final class FollowSeriesCache {
                     try { lock.wait(); } catch (InterruptedException error) { return; }
                 }
             }
+            if (item.epoch != epoch) continue; // Superseded by clear(); drop, don't download.
             // Yield to the player's own startup fetch, and to metered links.
             while (item != null && (holds > 0 || metered())) {
                 synchronized (lock) { pending.addFirst(item); queuedKeys.add(item.key()); }
@@ -218,18 +224,21 @@ final class FollowSeriesCache {
 
     private void process(Item item) {
         try {
-            if (cached(item) != null) return;
-            Exception exhaustion = null;
+            if (item.epoch != epoch || cached(item) != null) return;
             for (String quality : TIERS) {
+                if (givenUp(item.vid)) return;
                 try { store(item, quality); return; }
                 catch (InterruptedException interrupted) { throw interrupted; }
-                catch (Exception error) { exhaustion = error; }
+                catch (Exception error) {
+                    countFailure(item, error); // Every full download counts toward the cap.
+                    // A corrupt source is tier-independent; descending only re-downloads garbage.
+                    if (error instanceof ContentCheckException) break;
+                }
             }
-            retryOrFail(item, exhaustion == null || exhaustion.getMessage() == null
-                ? "各清晰度均未取得片源" : exhaustion.getMessage());
+            sleepQuietly(20000);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            synchronized (lock) { if (enabled) { pending.addFirst(item); queuedKeys.add(item.key()); } }
+            synchronized (lock) { if (enabled && item.epoch == epoch) { pending.addFirst(item); queuedKeys.add(item.key()); } }
         }
     }
 
@@ -253,20 +262,24 @@ final class FollowSeriesCache {
             return;
         }
         policy.invalidate(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index);
-        throw new java.io.IOException("内容校验失败: " + problem);
+        throw new ContentCheckException("内容校验失败: " + problem);
     }
 
-    private void retryOrFail(Item item, String reason) {
+    /** Count one failed download; requeue for a later retry unless the episode gave up. */
+    private void countFailure(Item item, Exception error) {
         int hits;
         synchronized (lock) { hits = failures.merge(item.vid, 1, Integer::sum); }
+        String reason = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
         if (hits >= MAX_FAILURES_PER_EPISODE) {
             Log.w("FollowCache", "giving up on " + item.sid + " #" + item.index + " after " + hits + " tries: " + reason);
-            sleepQuietly(20000);
             return;
         }
         Log.i("FollowCache", "retry later " + item.sid + " #" + item.index + " (" + hits + "): " + reason);
-        synchronized (lock) { if (enabled) { pending.addLast(item); queuedKeys.add(item.key()); } }
-        sleepQuietly(20000);
+        synchronized (lock) { if (enabled && item.epoch == epoch) { pending.addLast(item); queuedKeys.add(item.key()); } }
+    }
+
+    private boolean givenUp(String vid) {
+        synchronized (lock) { return failures.getOrDefault(vid, 0) >= MAX_FAILURES_PER_EPISODE; }
     }
 
     /** Already stored at any tier? The library never re-downloads a lower copy of an
@@ -312,7 +325,7 @@ final class FollowSeriesCache {
             while (registry.length() > 200) { Iterator<String> ids = registry.keys(); String oldest = null; long oldestAt = Long.MAX_VALUE;
                 while (ids.hasNext()) { String id = ids.next(); long at = registry.optJSONObject(id) == null ? 0 : registry.optJSONObject(id).optLong("updatedAt"); if (at < oldestAt) { oldestAt = at; oldest = id; } }
                 if (oldest == null) break; registry.remove(oldest); }
-            preferences().edit().putString("registry", registry.toString()).commit();
+            preferences().edit().putString("registry", registry.toString()).apply();
         } catch (JSONException ignored) { }
     }
 
