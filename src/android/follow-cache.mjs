@@ -31,21 +31,20 @@ export function createFollowCache({ nativeCall, source }) {
     return Number(result?.queued) || 0;
   }
 
-  async function enqueueFamily(seed, lastWatchedIndex) {
-    let queued = await enqueueSeries(seed.seriesId, lastWatchedIndex);
-    // A followed multi-season show means the whole story: cache playable siblings
-    // too. Season listing is best-effort and never blocks the main season.
-    if (seed.multiSeason) {
-      try {
-        const seasons = await requestOfficialSeries(seed.seriesId, { timeoutMs: 20000 });
-        const items = Array.isArray(seasons?.items) ? seasons.items : [];
-        for (const season of items) {
-          if (!season || season.seriesId === seed.seriesId || season.upcoming || !season.playable) continue;
-          try { queued += await enqueueSeries(season.seriesId, 0); } catch { /* Try the remaining seasons. */ }
-          await sleep(SERIES_STAGGER_MS);
-        }
-      } catch { /* Sibling seasons are optional. */ }
-    }
+  /** A followed multi-season show means the whole story: cache playable siblings too.
+   *  Season listing is best-effort and never blocks the followed season itself. */
+  async function enqueueSiblings(seed) {
+    let queued = 0;
+    if (!seed.multiSeason) return queued;
+    try {
+      const seasons = await requestOfficialSeries(seed.seriesId, { timeoutMs: 20000 });
+      const items = Array.isArray(seasons?.items) ? seasons.items : [];
+      for (const season of items) {
+        if (!season || season.seriesId === seed.seriesId || season.upcoming || !season.playable) continue;
+        try { queued += await enqueueSeries(season.seriesId, 0); } catch { /* Try the remaining seasons. */ }
+        await sleep(SERIES_STAGGER_MS);
+      }
+    } catch { /* Sibling seasons are optional. */ }
     return queued;
   }
 
@@ -68,9 +67,15 @@ export function createFollowCache({ nativeCall, source }) {
         .filter(item => item && SERIES_ID.test(String(item.seriesId)) && !completed.has(String(item.seriesId)))
         .sort((a, b) => (watchedAt.get(String(b.seriesId)) || Number(b.favoriteAt) || 0)
           - (watchedAt.get(String(a.seriesId)) || Number(a.favoriteAt) || 0));
+      // Every explicitly followed season first — the user's own list outranks seasons
+      // inferred from a multi-season family — then the inferred siblings.
       for (const series of ordered) {
-        try { await enqueueFamily(series, lastWatch.get(String(series.seriesId)) || 0); }
+        try { await enqueueSeries(series.seriesId, lastWatch.get(String(series.seriesId)) || 0); }
         catch { /* Individual series retry on the next sweep. */ }
+        await sleep(SERIES_STAGGER_MS);
+      }
+      for (const series of ordered) {
+        try { await enqueueSiblings(series); } catch { /* Siblings are optional. */ }
         await sleep(SERIES_STAGGER_MS);
       }
     } finally { sweeping = false; }
@@ -88,7 +93,10 @@ export function createFollowCache({ nativeCall, source }) {
     /** A favorite was just added: start caching it without waiting for a sweep. */
     favoriteAdded(series) {
       if (!series || !SERIES_ID.test(String(series.seriesId))) return;
-      enqueueFamily(series, 0).catch(() => {});
+      (async () => {
+        await enqueueSeries(series.seriesId, 0);
+        await enqueueSiblings(series);
+      })().catch(() => {});
     },
     /** Periodic new-episode discovery for ongoing shows; pauses with hidden pages. */
     start() {
