@@ -47,6 +47,100 @@ final class StagedMediaCheck {
         }
     }
 
+    /** Declared video dimensions of the vide track (tkhd width/height), or null when
+     *  unreadable. The hi3751 codec rejects frames whose larger edge exceeds its
+     *  declared 1920 cap (some CDN 1080p variants are 1080x1924), which Media3 turns
+     *  into a hard NoSupport with no codec ever initializing. */
+    static int[] videoSize(File file) {
+        if (file == null || !file.isFile()) return null;
+        RandomAccessFile data = null;
+        try {
+            data = new RandomAccessFile(file, "r");
+            long[] moov = findBox(data, 0, data.length(), "moov");
+            if (moov == null) return null;
+            long[] trak = findBox(data, moov[0] + 8, moov[0] + moov[1], "trak");
+            while (trak != null) {
+                int[] size = trackVideoSize(data, trak);
+                if (size != null) return size;
+                trak = findBox(data, trak[0] + trak[1], moov[0] + moov[1], "trak");
+            }
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (data != null) try { data.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    /** Declared video dimensions as Media3 will see them: the MP4 extractor overrides
+     *  the container size from the SPS inside hvcC, and the hi3751 codec hard-rejects
+     *  frames above its declared 1920 edge. Returns the coded edge, or 0 when unknown. */
+    static int codedVideoEdge(File file) {
+        if (file == null || !file.isFile()) return 0;
+        RandomAccessFile data = null;
+        try {
+            data = new RandomAccessFile(file, "r");
+            long[] moov = findBox(data, 0, data.length(), "moov");
+            if (moov == null) return 0;
+            long[] trak = findBox(data, moov[0] + 8, moov[0] + moov[1], "trak");
+            while (trak != null) {
+                int edge = trackVideoEdge(data, trak);
+                if (edge > 0) return edge;
+                trak = findBox(data, trak[0] + trak[1], moov[0] + moov[1], "trak");
+            }
+            return 0;
+        } catch (Exception ignored) {
+            return 0;
+        } finally {
+            if (data != null) try { data.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    /** Media3's own SPS-derived size for a vide track's hvcC (authoritative for what the
+     *  capability query will check), or the stsd entry size as a fallback. */
+    @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
+    private static int trackVideoEdge(RandomAccessFile data, long[] trak) throws Exception {
+        long[] mdia = findBox(data, trak[0] + 8, trak[0] + trak[1], "mdia");
+        if (mdia == null) return 0;
+        long[] hdlr = findBox(data, mdia[0] + 8, mdia[0] + mdia[1], "hdlr");
+        if (hdlr == null) return 0;
+        data.seek(hdlr[0] + 8 + 8);
+        byte[] handler = new byte[4]; data.readFully(handler);
+        if (!(handler[0] == 'v' && handler[1] == 'i' && handler[2] == 'd' && handler[3] == 'e')) return 0;
+        long[] minf = findBox(data, mdia[0] + 8, mdia[0] + mdia[1], "minf");
+        if (minf == null) return 0;
+        long[] stbl = findBox(data, minf[0] + 8, minf[0] + minf[1], "stbl");
+        if (stbl == null) return 0;
+        long[] stsd = findBox(data, stbl[0] + 8, stbl[0] + stbl[1], "stsd");
+        if (stsd == null) return 0;
+        long[] entry = findBox(data, stsd[0] + 16, stsd[0] + stsd[1], "hvc1");
+        if (entry == null) entry = findBox(data, stsd[0] + 16, stsd[0] + stsd[1], "hev1");
+        if (entry == null) entry = findBox(data, stsd[0] + 16, stsd[0] + stsd[1], "avc1");
+        if (entry == null) return 0;
+        // VisualSampleEntry: 6 reserved + data_ref_index(2) + pre_defined(2) + reserved(2)
+        // + pre_defined(12) → width(2), height(2) at body+24/26.
+        int stsdWidth = readUnsignedShort(data, entry[0] + 8 + 24);
+        int stsdHeight = readUnsignedShort(data, entry[0] + 8 + 26);
+        int edge = Math.max(stsdWidth, stsdHeight);
+        long[] hvcC = findBox(data, entry[0] + 8, entry[0] + entry[1], "hvcC");
+        if (hvcC != null && hvcC[1] > 8 && hvcC[1] <= 1 << 20) {
+            byte[] record = new byte[(int) (hvcC[1] - 8)];
+            data.seek(hvcC[0] + 8);
+            data.readFully(record);
+            try {
+                androidx.media3.extractor.mp4.HevcConfig config =
+                    androidx.media3.extractor.mp4.HevcConfig.parse(new androidx.media3.common.util.ParsableByteArray(record));
+                if (config.width > 0 && config.height > 0) edge = Math.max(config.width, config.height);
+            } catch (Exception ignored) { /* Container claims win when the SPS is unreadable. */ }
+        }
+        return edge > 0 && edge <= 16384 ? edge : 0;
+    }
+
+    private static int readUnsignedShort(RandomAccessFile data, long at) throws Exception {
+        data.seek(at);
+        return (data.read() << 8) | data.read();
+    }
+
     private static final class Sample { final long offset; final int size; Sample(long offset, int size) { this.offset = offset; this.size = size; } }
 
     /** First chunk offset + first sample size of the vide track inside a trak box, or null. */

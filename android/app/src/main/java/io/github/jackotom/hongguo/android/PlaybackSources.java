@@ -208,6 +208,20 @@ final class PlaybackSources {
     static int defaultPlaybackCeiling(String quality) {
         switch(MediaQuality.normalize(quality)) {case "720p":return 1079;case "480p":return 719;case "360p":return 479;default:return 0;}
     }
+    /** hi3751 codec ceiling: Media3 rejects any frame whose larger coded edge exceeds the
+     *  declared 1920 cap (some CDN 1080p HEVC variants are coded 1080x1924 — a hard
+     *  NoSupport in both orientations, with no codec ever initializing). */
+    static final int MAX_DECODER_EDGE = 1920;
+    static boolean beyondDecoderEdge(int width, int height) {
+        return width > 0 && height > 0 && Math.max(width, Math.max(height, 1)) > MAX_DECODER_EDGE;
+    }
+    /** Reject plans the device can never decode before any bytes are staged. */
+    static Plan requireDecodable(Plan plan) throws IOException {
+        if (plan != null && beyondDecoderEdge(plan.width, plan.height))
+            throw new QualityUnavailableException(String.format(java.util.Locale.ROOT,
+                "该 %dx%d 片源超出本机解码器 %d 上限，自动降档", plan.width, plan.height, MAX_DECODER_EDGE));
+        return plan;
+    }
     /** Fresh or bounded playback lookup; this opt-in path never changes manual download policy. */
     static Plan resolvePlayback(String sid,String vid,String quality,int ceiling,boolean fresh,boolean failedWeb) throws Exception {
         String requested=MediaQuality.normalize(quality);requireIdentity(sid,vid);

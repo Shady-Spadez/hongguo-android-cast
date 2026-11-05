@@ -1403,6 +1403,16 @@ export default function App() {
   // new episodes of ongoing shows on a slow interval while the page is around.
   useEffect(() => { followCache.refresh(library); }, [library]);
   useEffect(() => { followCache.start(); return undefined; }, []);
+  // First-open accelerator: warm the most recent unfinished episode while the user is
+  // still on the home grid, so pressing play starts from the staged head. Once per session.
+  const warmedSession = useRef(false);
+  useEffect(() => {
+    if (warmedSession.current || !library.history?.length) return;
+    const resume = library.history.find(row => !completedEpisode(row) && row.seriesId && row.vid);
+    if (!resume) return;
+    warmedSession.current = true;
+    nativeCall('prefetchPlayback', { series: compactSeries(resume), episode: { vid: resume.vid, index: resume.index, webAvailable: true, availability: 'unknown' } }, 180000).catch(() => {});
+  }, [library]);
   useTvNavigation(!!info.isTv);
   const closeDetail = useCallback(() => { setDetail(null); setTimeout(() => lastDetailFocus.current?.isConnected && lastDetailFocus.current.focus(), 0); }, []);
   const openDetail = (series, vid) => { lastDetailFocus.current = document.activeElement; previousScroll.current = content.current?.scrollTop || 0; setDetail({ seed: series, initialVid: vid }); };

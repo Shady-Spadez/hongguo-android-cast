@@ -496,6 +496,7 @@ final class NativeBridge {
                         || follow.find(sid, vid, index, quality) != null) { respond(id, new JSONObject().put("cached", true), null); break; }
                 PlaybackSources.Plan plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, false, false);
                 if (plan.source.equals("web")) { try { plan = PlaybackSources.resolvePlayback(sid, vid, quality, 0, true, true); } catch (Exception ignored) { } }
+                if (PlaybackSources.beyondDecoderEdge(plan.width, plan.height)) { respond(id, new JSONObject().put("cached", false), null); break; }
                 java.io.File ready = cache.fetch(sid, vid, index, plan, quality);
                 if (ready != null && StagedMediaCheck.firstSampleProblem(ready) != null) {
                     // Upstream content incident: drop the scrambled file instead of

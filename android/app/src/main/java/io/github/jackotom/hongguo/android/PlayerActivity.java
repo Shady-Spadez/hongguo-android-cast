@@ -542,7 +542,7 @@ public final class PlayerActivity extends Activity {
             Uri local = allowDownloads && offline && initialUrl != null ? Uri.parse(initialUrl) : allowDownloads && (offline || "auto".equals(stageQuality)) ? downloaded(target) : null;
             if (recovering) local = null;
             File cached = !recovering && local == null ? cache.find(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling) : null;
-            if (cached != null && StagedMediaCheck.firstSampleProblem(cached) != null) {
+            if (cached != null && localFileProblem(cached) != null) {
                 // An upstream content incident can leave fully-downloaded but scrambled
                 // files in the cache; drop them so playback re-fetches fresh media.
                 try { cache.invalidate(media.seriesId, target.optString("vid"), target.optInt("index"), stageQuality, ceiling); } catch (Exception ignored) { }
@@ -564,12 +564,15 @@ public final class PlayerActivity extends Activity {
                     if (exact != null) entry = new FollowSeriesCache.Entry(exact, stageQuality);
                 }
                 if (entry != null) {
-                    if (StagedMediaCheck.firstSampleProblem(entry.file) != null) {
-                        follow.invalidate(media.seriesId, followVid, followIndex, entry.quality);
-                    } else {
+                    String unusable = localFileProblem(entry.file);
+                    if (unusable == null) {
                         follow.protect(media.seriesId, followVid, followIndex, entry.quality);
                         media.followVid = followVid; media.followIndex = followIndex; media.followQuality = entry.quality;
                         cached = entry.file; followHit = true;
+                    } else {
+                        // Scrambled content or a frame size the codec will never accept:
+                        // drop the copy so the store self-heals at a decodable tier.
+                        follow.invalidate(media.seriesId, followVid, followIndex, entry.quality);
                     }
                 }
             }
@@ -633,8 +636,17 @@ public final class PlayerActivity extends Activity {
                 // CENC plans stage through a decrypting mirror (PlaybackSources.downloadProgressive):
                 // the .part always carries a plaintext head, so encrypted and clear episodes
                 // alike start playback from the first buffered megabytes.
+                PlaybackSources.requireDecodable(media.plan);
                 File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
-                String sampleProblem = StagedMediaCheck.firstSampleProblem(ready);
+                String sampleProblem = localFileProblem(ready);
+                if (sampleProblem != null && StagedMediaCheck.firstSampleProblem(ready) == null) {
+                    // Only the size gate tripped (the content is fine): stop the transfer
+                    // and descend immediately instead of handing Media3 a frame it will
+                    // hard-reject with no codec ever initializing.
+                    staging.cancel(true);
+                    try { cache.invalidate(media.seriesId, stageVid, stageIndex, stageQuality, ceiling); } catch (Exception ignored) { }
+                    throw new PlaybackSources.QualityUnavailableException(sampleProblem);
+                }
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
@@ -667,6 +679,16 @@ public final class PlayerActivity extends Activity {
             if (System.currentTimeMillis() >= deadline) return staging.get();
             Thread.sleep(200);
         }
+    }
+    /** Content sample check plus the device's decoder-edge gate: null when the local file
+     *  is playable, a human-readable reason otherwise. */
+    private static String localFileProblem(File file) {
+        String problem = StagedMediaCheck.firstSampleProblem(file);
+        if (problem != null) return problem;
+        int edge = StagedMediaCheck.codedVideoEdge(file);
+        if (edge > PlaybackSources.MAX_DECODER_EDGE)
+            return String.format(Locale.ROOT, "该 %dp 片源编码尺寸超出本机解码器 %d 上限", edge, PlaybackSources.MAX_DECODER_EDGE);
+        return null;
     }
     private static int stageCeiling(String quality, int maximumEdge) {
         int fixed = AdaptiveQuality.ceiling(quality);
@@ -1135,6 +1157,7 @@ public final class PlayerActivity extends Activity {
     }
     private void cacheEpisode(String sid, JSONObject target, PlaybackSources.Plan plan, String targetQuality, int token) {
         if (plan == null || destroyed || castWasActive || token != generation) return;
+        if (PlaybackSources.beyondDecoderEdge(plan.width, plan.height)) return; // Never stage undecodable frames.
         final int cacheToken = token, ceiling = plan.playbackCeiling;
         String path = Uri.parse(plan.url).getPath(); if (path == null || path.toLowerCase(Locale.ROOT).endsWith(".m3u8")) return;
         String key = sid + ":" + target.optString("vid") + ":" + target.optInt("index") + ":" + targetQuality + ":" + ceiling;

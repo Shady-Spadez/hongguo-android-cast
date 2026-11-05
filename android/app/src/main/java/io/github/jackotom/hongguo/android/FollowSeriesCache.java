@@ -61,6 +61,9 @@ final class FollowSeriesCache {
     static final class ContentCheckException extends java.io.IOException { ContentCheckException(String message) { super(message); } }
     /** The player's own fetch needs the link; the item requeues without counting. */
     static final class YieldException extends java.io.IOException { YieldException() { super("追剧缓存让路播放取源"); } }
+    /** A tier this device can never decode (frame edge above the codec cap): try the
+     *  next tier without burning a failure slot. */
+    static final class UnplayableException extends java.io.IOException { UnplayableException() { super("尺寸超出本机解码上限"); } }
 
     private FollowSeriesCache(Context context) {
         Context app = context.getApplicationContext();
@@ -256,6 +259,7 @@ final class FollowSeriesCache {
                         synchronized (lock) { if (enabled && item.epoch == epoch) { pending.addFirst(item); queuedKeys.add(item.key()); } }
                         return;
                     }
+                    if (error instanceof UnplayableException) continue; // Deterministic: try the next tier.
                     countFailure(item, error); // Every full download counts toward the cap.
                     // A corrupt source is tier-independent; descending only re-downloads garbage.
                     if (error instanceof ContentCheckException) break;
@@ -279,6 +283,8 @@ final class FollowSeriesCache {
         }
         if (!item.sid.equals(plan.seriesId) || !item.vid.equals(plan.vid) || !quality.equals(plan.requestedQuality))
             throw new java.io.IOException("片源身份不匹配");
+        // Never store a frame size the codec will hard-reject (e.g. 1080x1924 variants).
+        if (PlaybackSources.beyondDecoderEdge(plan.width, plan.height)) throw new UnplayableException();
         final PlaybackSources.Plan transfer = plan;
         File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index, transfer.url,
             (value, file, max) -> {
@@ -288,6 +294,8 @@ final class FollowSeriesCache {
                 PlaybackSources.downloadProgressive(transfer, file, max);
             });
         String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
+        int edge = ready == null ? 0 : StagedMediaCheck.codedVideoEdge(ready);
+        if (problem == null && edge > PlaybackSources.MAX_DECODER_EDGE) problem = "尺寸超上限";
         if (problem == null) {
             synchronized (lock) { failures.remove(item.vid); }
             return;
