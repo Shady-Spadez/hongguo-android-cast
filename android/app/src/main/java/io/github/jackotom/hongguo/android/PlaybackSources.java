@@ -208,14 +208,12 @@ final class PlaybackSources {
     static int defaultPlaybackCeiling(String quality) {
         switch(MediaQuality.normalize(quality)) {case "720p":return 1079;case "480p":return 719;case "360p":return 479;default:return 0;}
     }
-    /** hi3751 codec ceiling: Media3 rejects any frame whose larger coded edge exceeds the
-     *  declared 1920 cap (some CDN 1080p HEVC variants are coded 1080x1924 — a hard
-     *  NoSupport in both orientations, with no codec ever initializing).
-     *  EXPERIMENT: the hardware very likely decodes them fine — the cap is only the OMX
-     *  capability DECLARATION, which MediaVideoView now bypasses with a forced renderer.
-     *  While this is true the dimension gates are disabled; if configure() refuses, set
-     *  false to restore the instant-descent behaviour. */
-    static final boolean ALLOW_OVERSIZED_HEVC = true;
+    /** hi3751 codec ceiling: CDN 1080p HEVC variants coded 1080x1924 pass Media3 selection
+     *  (a caps failure maps to FORMAT_EXCEEDS_CAPABILITIES, so the codec is initialized
+     *  anyway) but the Hisilicon OMX configure stage then hangs with no callback —
+     *  infinite buffering until our watchdog descends. Verified against media3 1.4.1
+     *  source; no application-level bypass exists, so these frames are gated here. */
+    static final boolean ALLOW_OVERSIZED_HEVC = false;
     static final int MAX_DECODER_EDGE = 1920;
     static boolean beyondDecoderEdge(int width, int height) {
         if (ALLOW_OVERSIZED_HEVC) return false;

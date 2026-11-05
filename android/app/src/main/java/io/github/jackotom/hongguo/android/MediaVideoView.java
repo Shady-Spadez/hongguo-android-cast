@@ -142,36 +142,6 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if (player == null && source != null) open();
     }
 
-    /**
-     * The hi3751 OMX component DECLARES a 1920 maximum edge, but the hardware decodes
-     * slightly oversized frames (CDN 1080p variants coded 1080x1924) fine. Selection by
-     * declaration rejects them outright with no codec ever initializing, so the video
-     * renderer treats any rejected HEVC format as merely exceeding capabilities and lets
-     * MediaCodec configure() make the real call — a genuine hardware refusal surfaces as
-     * a decoder-init error and the player's normal quality descent takes over.
-     */
-    @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
-    private static androidx.media3.exoplayer.DefaultRenderersFactory forcedHevcRenderers(Context context) {
-        return new androidx.media3.exoplayer.DefaultRenderersFactory(context) {
-            @Override protected void buildVideoRenderers(Context context, int extensionRendererMode,
-                    androidx.media3.exoplayer.mediacodec.MediaCodecSelector mediaCodecSelector,
-                    boolean enableDecoderFallback, android.os.Handler eventHandler,
-                    androidx.media3.exoplayer.video.VideoRendererEventListener eventListener,
-                    long allowedVideoJoiningTimeMs, java.util.ArrayList<androidx.media3.exoplayer.Renderer> out) {
-                out.add(new androidx.media3.exoplayer.video.MediaCodecVideoRenderer(
-                    context, mediaCodecSelector, allowedVideoJoiningTimeMs) {
-                    @Override protected int getFormatSupport(androidx.media3.common.Format format) {
-                        int support = super.getFormatSupport(format);
-                        if (support == androidx.media3.common.C.FORMAT_UNSUPPORTED
-                                && androidx.media3.common.MimeTypes.VIDEO_H265.equals(format.sampleMimeType))
-                            return androidx.media3.common.C.FORMAT_EXCEEDS_CAPABILITIES;
-                        return support;
-                    }
-                });
-            }
-        };
-    }
-
     @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { }
 
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
@@ -188,7 +158,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             if (staging != null) awaitStagedHead(source.getPath(), 768 * 1024);
             patchHevcLevelClaim(source.getPath());
         }
-        ExoPlayer fresh = new ExoPlayer.Builder(getContext(), forcedHevcRenderers(getContext())).build();
+        ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
         if (staging != null && "file".equals(source.getScheme()))
             fresh.setMediaSource(new ProgressiveMediaSource.Factory(() -> new GrowingFileDataSource(new java.io.File(source.getPath()), staging)).createMediaSource(MediaItem.fromUri(source)));
