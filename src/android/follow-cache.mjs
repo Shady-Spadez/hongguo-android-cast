@@ -53,7 +53,7 @@ export function createFollowCache({ nativeCall, source }) {
     return queued;
   }
 
-  async function sweep(library) {
+  async function sweep(library, force = false) {
     if (sweeping) return;
     const favorites = Array.isArray(library?.favorites) ? library.favorites : [];
     if (!favorites.length) return;
@@ -75,7 +75,7 @@ export function createFollowCache({ nativeCall, source }) {
       // Library refreshes fire on every resume; an unchanged follow list within the
       // throttle window needs no new episode discovery — the 30-minute timer covers it.
       const favoritesKey = ordered.map(series => String(series.seriesId)).join(',');
-      if (Date.now() - lastSweepAt < SWEEP_THROTTLE_MS && favoritesKey === lastFavoritesKey) return;
+      if (!force && Date.now() - lastSweepAt < SWEEP_THROTTLE_MS && favoritesKey === lastFavoritesKey) return;
       // Every explicitly followed season first — the user's own list outranks seasons
       // inferred from a multi-season family — then the inferred siblings.
       for (const series of ordered) {
@@ -98,8 +98,9 @@ export function createFollowCache({ nativeCall, source }) {
       latest = library;
       sweep(library).catch(() => {});
     },
-    /** Re-run the last sweep — used right after re-enabling the cacher. */
-    resweep() { if (latest) sweep(latest).catch(() => {}); },
+    /** Re-run the last sweep — used right after re-enabling the cacher, bypassing
+     *  the throttle (a disable cleared the native queue; the re-enable must refill). */
+    resweep() { if (latest) sweep(latest, true).catch(() => {}); },
     /** A favorite was just added: start caching it without waiting for a sweep. */
     favoriteAdded(series) {
       if (!series || !SERIES_ID.test(String(series.seriesId))) return;

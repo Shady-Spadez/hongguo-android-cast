@@ -49,7 +49,7 @@ final class FollowSeriesCache {
     private volatile int holds;
     private Thread worker;
     /** Bumped by clear(); queued items from an older epoch are dropped, not re-downloaded. */
-    private int epoch;
+    private volatile int epoch;
 
     static final class Item {
         final String sid, vid, quality; final int index; final int epoch;

@@ -618,10 +618,17 @@ public final class PlayerActivity extends Activity {
                 FollowSeriesCache.get(this).hold(true);
                 final java.util.concurrent.atomic.AtomicBoolean holdReleased = new java.util.concurrent.atomic.AtomicBoolean(false);
                 media.holdReleased = holdReleased;
-                java.util.concurrent.Future<File> staging = cacheWorker.submit(() -> {
-                    try { return cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality); }
-                    finally { if (holdReleased.compareAndSet(false, true)) FollowSeriesCache.get(this).hold(false); }
-                });
+                java.util.concurrent.Future<File> staging;
+                try {
+                    staging = cacheWorker.submit(() -> {
+                        try { return cache.fetchForeground(media.seriesId, stageVid, stageIndex, media.plan, stageQuality); }
+                        finally { if (holdReleased.compareAndSet(false, true)) FollowSeriesCache.get(this).hold(false); }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                    // A shutdown racing the resolver: nothing was submitted, so release here.
+                    if (holdReleased.compareAndSet(false, true)) FollowSeriesCache.get(this).hold(false);
+                    throw rejected;
+                }
                 media.staging = staging;
                 // CENC plans stage through a decrypting mirror (PlaybackSources.downloadProgressive):
                 // the .part always carries a plaintext head, so encrypted and clear episodes
