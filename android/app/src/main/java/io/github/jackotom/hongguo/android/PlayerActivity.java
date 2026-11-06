@@ -758,7 +758,7 @@ public final class PlayerActivity extends Activity {
                 if (!destroyed && token == generation) {
                     status.setText("硬件解码受阻 · 正在切换软解 1080p…"); showControls();
                     try { resumeAt = Math.max(0, video.getCurrentPosition()); } catch (RuntimeException ignored) { }
-                    loadAt(current, null, resumeAt, userPaused, false, true);
+                    loadAt(current, null, resumeAt, userPaused, false);
                 }
             });
             return;
