@@ -230,6 +230,16 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     }
 
     private void openVlc(String path, Surface surface) {
+        // The retry may race the staging completion rename: the .part was already
+        // promoted to the final name between prepareMedia and this call.
+        if (path.endsWith(".part")) {
+            String promoted = path.substring(0, path.length() - 5);
+            if (new java.io.File(promoted).isFile()) path = promoted;
+            else if (!new java.io.File(path).isFile()) {
+                notifyError(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
+                return;
+            }
+        }
         vlc = new VlcPipeline(path, surface);
         vlc.player.play();
     }
