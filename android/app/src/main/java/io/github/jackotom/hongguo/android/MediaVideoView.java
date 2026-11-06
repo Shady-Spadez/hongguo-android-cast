@@ -208,7 +208,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                             notifyError(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
                             break;
                         case org.videolan.libvlc.MediaPlayer.Event.Buffering:
-                            if (event.buffering >= 100f) notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_END);
+                            if (event.getBuffering() >= 100f) notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_END);
                             else notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_START);
                             break;
                         case org.videolan.libvlc.MediaPlayer.Event.Vout:

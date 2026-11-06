@@ -641,6 +641,7 @@ public final class PlayerActivity extends Activity {
                 // Software-decode route for oversized CDN variants: the codec hard-rejects
                 // frames above 1920, so libVLC decodes them in software.
                 softwareDecodeThisEpisode = PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
+                String sampleProblem = localFileProblem(ready);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
