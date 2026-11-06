@@ -786,8 +786,9 @@ public final class PlayerActivity extends Activity {
     private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb, boolean silent) {
         if (destroyed || position < 0 || position >= queue.size()) return;
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
+        boolean episodeChanged = current != position; // VLC retry keeps its budget on same-episode retries
         current = position; episode = queue.get(current); series = owner(episode); final JSONObject target = episode, targetSeries = series;
-        vlcRetryUsed = false; vlcRetryPending = false; // fresh VLC retry budget per episode
+        if (episodeChanged) { vlcRetryUsed = false; vlcRetryPending = false; }
         if (!offline) {
             if (localWindow == null) localWindow = cache.openQueueWindow(queueSeries == null ? series : queueSeries, queue, current, cleanup, 1, false);
             else localWindow.moveTo(current);
