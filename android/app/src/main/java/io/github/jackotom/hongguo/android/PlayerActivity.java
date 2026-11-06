@@ -643,10 +643,12 @@ public final class PlayerActivity extends Activity {
                 // Software-decode route for oversized CDN variants: the codec hard-rejects
                 // frames above 1920, so libVLC decodes them in software. The retry flag
                 // covers frames whose metadata says 1920 but whose SPS codes 1924.
+                // VLC needs the COMPLETE file (it does its own demux); wait for the
+                // full transfer instead of starting from the staged head.
                 softwareDecodeThisEpisode = vlcRetryPending || PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
                 vlcRetryPending = false;
-                String sampleProblem = localFileProblem(ready);
-                if (sampleProblem != null) {
+                if (softwareDecodeThisEpisode && ready.getName().endsWith(".part"))
+                    ready = staging.get(); // follow through to the renamed final file
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
                     // cancel the transfer, and clear the entry so recovery re-fetches.
