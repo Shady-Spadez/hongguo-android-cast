@@ -24,8 +24,8 @@ android {
         applicationId 'io.github.jackotom.hongguo.android'
         minSdk 26
         targetSdk 35
-        versionCode 80
-        versionName '0.12.51'
+        versionCode 81
+        versionName '0.12.52'
         // The hi3751 is ARMv7 only; this also keeps the libVLC native footprint to one ABI.
         
     }
