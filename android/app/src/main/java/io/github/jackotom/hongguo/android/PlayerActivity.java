@@ -103,6 +103,8 @@ public final class PlayerActivity extends Activity {
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
     private boolean silentAdvance; // auto-advance keeps the HUD hidden end to end
     private boolean softwareDecodeThisEpisode; // oversized frame edge: route to libVLC
+    private boolean vlcRetryPending; // hardware stall: retry this episode through VLC
+    private boolean vlcRetryUsed;   // one VLC retry per episode selection
     private final java.util.HashMap<String,Integer> poisonCounts = new java.util.HashMap<>();
     static final class MediaContentPoisonedException extends java.io.IOException { MediaContentPoisonedException(String message) { super(message); } }
     private boolean surfaceRecoveryArmed = true;
@@ -639,8 +641,10 @@ public final class PlayerActivity extends Activity {
                 // alike start playback from the first buffered megabytes.
                 File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
                 // Software-decode route for oversized CDN variants: the codec hard-rejects
-                // frames above 1920, so libVLC decodes them in software.
-                softwareDecodeThisEpisode = PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
+                // frames above 1920, so libVLC decodes them in software. The retry flag
+                // covers frames whose metadata says 1920 but whose SPS codes 1924.
+                softwareDecodeThisEpisode = vlcRetryPending || PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
+                vlcRetryPending = false;
                 String sampleProblem = localFileProblem(ready);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
@@ -744,6 +748,21 @@ public final class PlayerActivity extends Activity {
     private void failCurrentMedia(int token, String reason, boolean unsupported) {
         if (!validPlaybackCallback(token, video)) return;
         cancelPlaybackWatchdogs(); decoderPreparing = false;
+        // Oversized-frame stall: the hardware decoder binds buffers but never produces
+        // a frame (SPS-coded 1080x1924 while the plan metadata reports 1920). Before
+        // descending to 720p, retry this episode through libVLC software decode.
+        if (!softwareDecodeThisEpisode && !vlcRetryUsed) {
+            vlcRetryUsed = true;
+            vlcRetryPending = true;
+            main.post(() -> {
+                if (!destroyed && token == generation) {
+                    status.setText("硬件解码受阻 · 正在切换软解 1080p…"); showControls();
+                    try { resumeAt = Math.max(0, video.getCurrentPosition()); } catch (RuntimeException ignored) { }
+                    loadAt(current, null, resumeAt, userPaused, false, true);
+                }
+            });
+            return;
+        }
         if (!recoverMedia(token, unsupported ? MediaPlayer.MEDIA_ERROR_UNSUPPORTED : 1, 0, reason) && !lowerCurrentMedia(token, reason))
             playbackError(token, reason + (lastMediaError == null || lastMediaError.equals(reason) ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集", true);
     }
@@ -768,6 +787,7 @@ public final class PlayerActivity extends Activity {
         if (destroyed || position < 0 || position >= queue.size()) return;
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
         current = position; episode = queue.get(current); series = owner(episode); final JSONObject target = episode, targetSeries = series;
+        vlcRetryUsed = false; vlcRetryPending = false; // fresh VLC retry budget per episode
         if (!offline) {
             if (localWindow == null) localWindow = cache.openQueueWindow(queueSeries == null ? series : queueSeries, queue, current, cleanup, 1, false);
             else localWindow.moveTo(current);
