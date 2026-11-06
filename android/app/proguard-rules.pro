@@ -9,7 +9,3 @@
 -dontwarn org.checkerframework.**
 -dontwarn com.google.errorprone.**
 
-# libVLC JNI bindings: the native side resolves Java methods by name.
--keep class org.videolan.libvlc.** { *; }
--keep class org.videolan.medialibrary.** { *; }
--keep class org.videolan.** { *; }

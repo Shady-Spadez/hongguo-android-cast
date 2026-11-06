@@ -102,9 +102,6 @@ public final class PlayerActivity extends Activity {
     private int resumeAt;
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
     private boolean silentAdvance; // auto-advance keeps the HUD hidden end to end
-    private boolean softwareDecodeThisEpisode; // oversized frame edge: route to libVLC
-    private boolean vlcRetryPending; // hardware stall: retry this episode through VLC
-    private boolean vlcRetryUsed;   // one VLC retry per episode selection
     private final java.util.HashMap<String,Integer> poisonCounts = new java.util.HashMap<>();
     static final class MediaContentPoisonedException extends java.io.IOException { MediaContentPoisonedException(String message) { super(message); } }
     private boolean surfaceRecoveryArmed = true;
@@ -645,10 +642,6 @@ public final class PlayerActivity extends Activity {
                 // covers frames whose metadata says 1920 but whose SPS codes 1924.
                 // VLC needs the COMPLETE file (it does its own demux); wait for the
                 // full transfer instead of starting from the staged head.
-                softwareDecodeThisEpisode = vlcRetryPending || PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
-                vlcRetryPending = false;
-                if (softwareDecodeThisEpisode && ready.getName().endsWith(".part"))
-                    ready = staging.get(); // follow through to the renamed final file
                 String sampleProblem = localFileProblem(ready);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
@@ -664,7 +657,6 @@ public final class PlayerActivity extends Activity {
                     if (poisoned >= 2) throw new MediaContentPoisonedException("红果片源服务异常，内容校验已连续失败（" + sampleProblem + "）。已清除损坏缓存，请稍后再试");
                     throw new java.io.IOException("片源内容损坏（" + sampleProblem + "），已清除缓存并重试");
                 }
-                media.uri = Uri.fromFile(ready); media.kind = softwareDecodeThisEpisode ? "软解 1080p · 缓存播放" : "片源已准备 · 缓存播放"; media.cached = true;
                 media.staging = ready.getName().endsWith(".part") ? staging : null;
             }
             success = true; return media;
@@ -709,10 +701,6 @@ public final class PlayerActivity extends Activity {
         catch (Exception first) {
             if (offline || fresh || !PlaybackSources.canRecoverPlayback(first) || destroyed || token != generation || Thread.currentThread().isInterrupted()
                     || !recoveryBudget.take(token, false, false, false)) throw first;
-            main.post(() -> { if (!destroyed && token == generation) { status.setText("片源暂未取得 · 正在自动重新取源 " + qualityLabel(stageQuality)); showControls(); } });
-            try { return prepareMedia(target, stageQuality, null, true, failedWeb, true, maximumEdge, window); }
-            catch (Exception retry) { if (retry != first) retry.addSuppressed(first); throw retry; }
-        }
     }
     private void cancelPlaybackWatchdogs() {
         if (playbackPrepareTimeout != null) { main.removeCallbacks(playbackPrepareTimeout); playbackPrepareTimeout = null; }
@@ -755,26 +743,11 @@ public final class PlayerActivity extends Activity {
         // Oversized-frame stall: the hardware decoder binds buffers but never produces
         // a frame (SPS-coded 1080x1924 while the plan metadata reports 1920). Before
         // descending to 720p, retry this episode through libVLC software decode.
-        if (!softwareDecodeThisEpisode && !vlcRetryUsed) {
-            vlcRetryUsed = true;
-            vlcRetryPending = true;
-            main.post(() -> {
-                if (!destroyed && token == generation) {
-                    status.setText("硬件解码受阻 · 正在切换软解 1080p…"); showControls();
-                    try { resumeAt = Math.max(0, video.getCurrentPosition()); } catch (RuntimeException ignored) { }
-                    loadAt(current, null, resumeAt, userPaused, false);
-                }
-            });
-            return;
         }
         if (!recoverMedia(token, unsupported ? MediaPlayer.MEDIA_ERROR_UNSUPPORTED : 1, 0, reason) && !lowerCurrentMedia(token, reason))
             playbackError(token, reason + (lastMediaError == null || lastMediaError.equals(reason) ? "" : "；原错误：" + lastMediaError) + "，可重试或选择其他分集", true);
     }
     private void stageProgress(int token, String stageQuality, int stage, boolean switching) {
-        main.post(() -> {
-            if (destroyed || token != generation) return;
-            String message = stage == 1 ? "正在准备 " : "当前档多次失败 · 自动降低至 ";
-            status.setText(message + qualityLabel(stageQuality) + " 视频…" + (switching ? "；当前播放保持" : ""));
             showControls();
         });
     }
@@ -790,9 +763,8 @@ public final class PlayerActivity extends Activity {
     private void loadAtInternal(int position, String initialUrl, int startAt, boolean remainPaused, boolean recovering, boolean failedWeb, boolean silent) {
         if (destroyed || position < 0 || position >= queue.size()) return;
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false; if (!recovering) saveProgress(); video.stopPlayback(); releaseCurrent(); mediaPlayer = null;
-        boolean episodeChanged = current != position; // VLC retry keeps its budget on same-episode retries
+        // Episode change detection for quality reset
         current = position; episode = queue.get(current); series = owner(episode); final JSONObject target = episode, targetSeries = series;
-        if (episodeChanged) { vlcRetryUsed = false; vlcRetryPending = false; }
         if (!offline) {
             if (localWindow == null) localWindow = cache.openQueueWindow(queueSeries == null ? series : queueSeries, queue, current, cleanup, 1, false);
             else localWindow.moveTo(current);
@@ -817,10 +789,6 @@ public final class PlayerActivity extends Activity {
                     () -> !destroyed && token == generation,
                     (stageQuality, stage, error) -> stageProgress(token, stageQuality, stage, false), this::releasePrepared);
                 final PreparedMedia media = result.value; final String playedQuality = result.quality;
-                main.post(() -> {
-                    if (destroyed || token != generation) { releasePrepared(media); return; }
-                    adoptMedia(media);
-                    currentKind = media.kind; currentManual = media.manual; currentCache = media.cached; currentWeb = media.remote != null;
                     sourceShortEdge = media.plan != null && media.plan.width > 0 && media.plan.height > 0 ? Math.min(media.plan.width, media.plan.height) : 0; renderStatus();
                     MediaVideoView targetView = video;
                     bindPlayback(targetView, token, target, media.remote, playedQuality);
@@ -847,7 +815,6 @@ public final class PlayerActivity extends Activity {
                     });
                     Map<String, String> headers = new HashMap<>();
                     headers.put("User-Agent", media.plan == null ? NetworkGuard.UA : media.plan.userAgent); headers.put("Referer", media.plan == null ? NetworkGuard.REFERER : media.plan.referer);
-                    try { armPreparationTimeout(token, targetView); targetView.setSoftwareDecode(softwareDecodeThisEpisode); targetView.setVideoURI(media.uri, headers, media.staging); media.staging = null; }
                     catch (RuntimeException error) { failCurrentMedia(token, "设备打开视频未成功：" + error.getMessage(), false); }
                 });
             } catch (Exception error) { main.post(() -> playbackError(token, recovering ? "自动恢复未成功：" + error.getMessage() + "；原错误：" + lastMediaError : error.getMessage())); }
@@ -986,10 +953,6 @@ public final class PlayerActivity extends Activity {
                 AdaptiveQuality.Result<PreparedMedia> result = AdaptiveQuality.prepare(startQuality,
                     stageQuality -> prepareMedia(job.episode, stageQuality, null, !stageQuality.equals(job.quality) || job.ceiling > 0, false, false, stageQuality.equals(job.quality) ? job.ceiling : stageCeiling(stageQuality, job.ceiling > 0 ? job.ceiling : AdaptiveQuality.ceiling(stageQuality)), job.window),
                     PlaybackSources::canRecoverPlayback, () -> validSwitch(job),
-                    (stageQuality, stage, error) -> main.post(() -> { if (validSwitch(job)) { status.setText((stage == 1 && startQuality.equals(job.quality) ? "后台准备 " : "当前档多次失败 · 自动降低至 ") + qualityLabel(stageQuality) + " 视频…；当前播放保持"); showControls(); } }), this::releasePrepared);
-                PreparedMedia media = result.value;
-                main.post(() -> {
-                    if (!validSwitch(job)) { releasePrepared(media); return; }
                     job.media = media;
                     prepareQualitySwitch(job, media.uri);
                 });
@@ -1114,11 +1077,9 @@ public final class PlayerActivity extends Activity {
             // hi-player video-output handle and every subsequent MediaPlayer start fails
             // with error (1,0); rebuilding the activity surface once restores playback.
             surfaceRecoveryArmed = false;
-            try { if (prepared) resumeAt = Math.max(0, video.getCurrentPosition()); } catch (RuntimeException ignored) { }
             cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false;
             status.setText("设备解码通道异常 · 正在自动恢复播放"); updateButtons(); showControls();
             main.postDelayed(() -> { if (!destroyed && !isFinishing()) recreate(); }, 700);
-            return;
         }
         cancelQualitySwitch(); cancelPlaybackWatchdogs(); decoderPreparing = false;
         prepared = false; video.stopPlayback(); status.setText(message == null ? "本集片源暂不可用" : message); updateButtons(); showControls();
@@ -1458,7 +1419,6 @@ public final class PlayerActivity extends Activity {
                 .setMessage("先停止原投屏，再从本剧选择接收设备。")
                 .setPositiveButton("停止原投屏", (dialog, which) -> { if (hasBrowser) browserCastService.stopCast(); if (hasDlna) castService.stopCast(); })
                 .setNegativeButton("保留", null).create());
-            return;
         }
         if (hasBrowser) { showBrowserCastMenu(); return; }
         if (hasDlna) { showCastDevices(); return; }
@@ -1540,18 +1500,6 @@ public final class PlayerActivity extends Activity {
                 android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
                 if (wifi == null) throw new IllegalStateException("请连接 Wi-Fi 后重试");
                 multicast = wifi.createMulticastLock("hongguo-dlna-discovery"); multicast.setReferenceCounted(false); multicast.acquire();
-                DlnaDiscovery.discover(castWifiAddress(), 6000, device -> main.post(() -> {
-                    if (destroyed || cancelled.get() || !picker.isShowing()) return;
-                    devices.add(device); adapter.add(device.name + " · " + device.host); adapter.notifyDataSetChanged();
-                }), cancelled::get);
-                main.post(() -> { if (!destroyed && !cancelled.get() && picker.isShowing()) hint.setText(devices.isEmpty()
-                    ? "没有找到 DLNA 电视。请检查同一 Wi-Fi、电视接收入口，以及路由器是否开启了设备隔离。关闭后可重新搜索。"
-                    : "请选择电视；列表仅包含支持 DLNA 媒体播放的接收端。"); });
-            } catch (Exception error) {
-                main.post(() -> { if (!destroyed && !cancelled.get() && picker.isShowing()) hint.setText("搜索未完成，请检查 Wi-Fi 与电视投屏入口后重试。"); });
-            } finally { if (multicast != null && multicast.isHeld()) multicast.release(); }
-        });
-    }
     private String castWifiAddress() throws java.io.IOException {
         android.net.ConnectivityManager manager = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (manager != null) for (android.net.Network network : manager.getAllNetworks()) {

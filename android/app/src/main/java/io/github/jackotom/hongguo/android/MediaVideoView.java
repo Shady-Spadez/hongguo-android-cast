@@ -60,15 +60,6 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     private OnSeekCompleteListener onSeekCompleteListener;
     private OnVideoSizeChangedListener onVideoSizeChangedListener;
 
-    // Software-decode fallback via libVLC for frames the hi3751 OMX stage cannot
-    // handle (CDN 1080p variants coded 1080x1924: the codec accepts the configure,
-    // binds buffers, and then never produces a frame). When this flag is set the
-    // local file is handed to libVLC's multithreaded ffmpeg decoder instead.
-    private VlcPipeline vlc;
-    private boolean softwareDecode;
-    /** Set before setVideoURI to route this episode through the software decoder. */
-    void setSoftwareDecode(boolean value) { softwareDecode = value; }
-
     MediaVideoView(Context context) {
         super(context);
         getHolder().addCallback(this);
@@ -94,38 +85,26 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     public void setOnVideoSizeChangedListener(OnVideoSizeChangedListener listener) { onVideoSizeChangedListener = listener; }
 
     public void start() {
-        if (vlc != null) { vlc.player.play(); return; }
         if (player != null) player.setPlayWhenReady(true);
         else if (source != null) open();
     }
 
     public void pause() {
-        if (vlc != null) { vlc.player.pause(); return; }
         if (player != null) player.setPlayWhenReady(false);
     }
 
     public void seekTo(int position) {
-        if (vlc != null) { vlc.player.setTime(position); return; }
         if (player != null) player.seekTo(position);
         else seekOnPrepare = position;
     }
 
     public void stopPlayback() { release(); }
 
-    public boolean isPlaying() {
-        if (vlc != null) return vlc.player.isPlaying();
-        return player != null && player.isPlaying();
-    }
+    public boolean isPlaying() { return player != null && player.isPlaying(); }
 
-    public int getCurrentPosition() {
-        if (vlc != null) return (int) vlc.player.getTime();
-        return player == null ? 0 : (int) player.getCurrentPosition();
-    }
+    public int getCurrentPosition() { return player == null ? 0 : (int) player.getCurrentPosition(); }
 
-    public int getDuration() {
-        if (vlc != null) return (int) vlc.player.getLength();
-        return player == null ? 0 : (int) player.getDuration();
-    }
+    public int getDuration() { return player == null ? 0 : (int) player.getDuration(); }
 
     public int getVideoWidth() { return videoWidth; }
 
@@ -135,13 +114,9 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
 
     /** Mirrors PlayerOptions.observedSpeed/setVerifiedSpeed semantics on Media3, whose
      *  setPlaybackParameters neither throws spuriously nor resumes a paused player. */
-    public float playbackSpeed() {
-        if (vlc != null) return vlc.player.getRate();
-        return player == null ? 1f : player.getPlaybackParameters().speed;
-    }
+    public float playbackSpeed() { return player == null ? 1f : player.getPlaybackParameters().speed; }
 
     public void setPlaybackSpeed(float speed) {
-        if (vlc != null) { vlc.player.setRate(speed); return; }
         if (player != null) player.setPlaybackParameters(new PlaybackParameters(speed));
     }
 
@@ -167,85 +142,6 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if (player == null && source != null) open();
     }
 
-    /** Software-decode pipeline via libVLC for frames the hi3751 codec cannot handle. */
-    private final class VlcPipeline {
-        final org.videolan.libvlc.LibVLC libVLC;
-        final org.videolan.libvlc.MediaPlayer player;
-
-        VlcPipeline(String path, Surface surface) {
-            java.util.ArrayList<String> args = new java.util.ArrayList<>();
-            args.add("--no-osd");
-            args.add("--avcodec-skiploopfilter");
-            args.add("1"); // skip loop filtering for speed on A53
-            args.add("--avcodec-threads");
-            args.add("4");
-            libVLC = new org.videolan.libvlc.LibVLC(getContext().getApplicationContext(), args);
-            player = new org.videolan.libvlc.MediaPlayer(libVLC);
-            org.videolan.libvlc.interfaces.IVLCVout vout = player.getVLCVout();
-            vout.setVideoSurface(surface, getHolder());
-            vout.attachViews();
-            org.videolan.libvlc.Media media = new org.videolan.libvlc.Media(libVLC, path);
-            player.setMedia(media);
-            media.release();
-            player.setEventListener(event -> {
-                mainHandler.post(() -> {
-                    if (vlc == null || vlc.player != player) return; // stale pipeline
-                    switch (event.type) {
-                        case org.videolan.libvlc.MediaPlayer.Event.Playing:
-                            if (!prepared) {
-                                prepared = true;
-                                if (seekOnPrepare != 0) { player.setTime(seekOnPrepare); seekOnPrepare = 0; }
-                                OnPreparedListener preparedCallback = onPreparedListener;
-                                if (preparedCallback != null) preparedCallback.onPrepared(MediaVideoView.this);
-                            }
-                            notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_END);
-                            break;
-                        case org.videolan.libvlc.MediaPlayer.Event.EndReached:
-                            OnCompletionListener completionCallback = onCompletionListener;
-                            if (completionCallback != null) completionCallback.onCompletion(MediaVideoView.this);
-                            break;
-                        case org.videolan.libvlc.MediaPlayer.Event.EncounteredError:
-                            notifyError(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
-                            break;
-                        case org.videolan.libvlc.MediaPlayer.Event.Buffering:
-                            if (event.getBuffering() >= 100f) notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_END);
-                            else notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_START);
-                            break;
-                        case org.videolan.libvlc.MediaPlayer.Event.Vout:
-                            // Video dimensions come from the container metadata (PlayerActivity
-                            // already knows them); the aspect-fit layout uses those values.
-                            break;
-                    }
-                });
-            });
-        }
-
-        void release() {
-            player.setEventListener(null);
-            player.stop();
-            player.getVLCVout().detachViews();
-            player.release();
-            libVLC.release();
-        }
-    }
-
-    private void openVlc(String path, Surface surface) {
-        // The retry may race the staging completion rename: the .part was already
-        // promoted to the final name between prepareMedia and this call.
-        if (path.endsWith(".part")) {
-            String promoted = path.substring(0, path.length() - 5);
-            if (new java.io.File(promoted).isFile()) path = promoted;
-            else if (!new java.io.File(path).isFile()) {
-                notifyError(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
-                return;
-            }
-        }
-        vlc = new VlcPipeline(path, surface);
-        vlc.player.play();
-    }
-
-    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-
     @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) { }
 
     @Override public void surfaceDestroyed(SurfaceHolder holder) {
@@ -261,10 +157,6 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if ("file".equals(source.getScheme())) {
             if (staging != null) awaitStagedHead(source.getPath(), 768 * 1024);
             patchHevcLevelClaim(source.getPath());
-        }
-        if (softwareDecode && "file".equals(source.getScheme())) {
-            openVlc(source.getPath(), surface);
-            return;
         }
         ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
@@ -429,9 +321,8 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
             int levelOffset = boxStart + 4 + 12; // general_level_idc within hvcC payload
             if (levelOffset < boxEnd && (buffer[levelOffset] & 0xff) > 123) {
                 buffer[levelOffset] = (byte) 120;
-                // A decrypting mirror may have truncated the staging file after the read;
-                // writing past its current length would punch a zero hole into it.
-                if (file.length() > levelOffset) { file.seek(levelOffset); file.write(buffer[levelOffset]); }
+                file.seek(levelOffset);
+                file.write(buffer[levelOffset]);
             }
             // The SPS NAL inside the hvcC arrays repeats the level inside its
             // profile_tier_level — with this encoder the zero run carries three
@@ -445,7 +336,8 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                 int level = buffer[i + 10] & 0xff;
                 if (level > 123) {
                     buffer[i + 10] = (byte) 120;
-                    if (file.length() > i + 10) { file.seek(i + 10); file.write(buffer[i + 10]); }
+                    file.seek(i + 10);
+                    file.write(buffer[i + 10]);
                 }
             }
         } catch (Exception ignored) {
@@ -461,10 +353,6 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
 
     private void release() {
         prepared = false;
-        if (vlc != null) {
-            try { vlc.release(); } catch (Exception ignored) { }
-            vlc = null;
-        }
         if (player != null) {
             try { player.setVideoSurface(null); player.stop(); player.release(); } catch (Exception ignored) { }
             player = null;
