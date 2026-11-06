@@ -75,12 +75,11 @@ final class FollowSeriesCache {
         policy = new PlaybackCachePolicy(directory, BUDGET_BYTES, MAX_FILE_BYTES, PlaybackSources::downloadProgressive);
         SharedPreferences prefs = preferences();
         enabled = prefs.getBoolean("enabled", true);
-        if (prefs.getInt("schema", 1) < 2) {
-            // Schema 2 stores only decoder-decodable tiers (plan-dimension gate). The
-            // previous library may hold 1080p variants the OMX stage hangs on (coded
-            // 1080x1924): rebuild it once; the next sweep refills at decodable tiers.
+        if (prefs.getInt("schema", 1) < 3) {
+            // Schema 3 stores the best tier: oversized frames route through libVLC's
+            // software decoder, so the hardware codec's 1920 edge no longer gates storage.
             try { policy.clear(); } catch (Exception ignored) { }
-            prefs.edit().putInt("schema", 2).remove("registry").apply();
+            prefs.edit().putInt("schema", 3).remove("registry").apply();
         }
     }
 
@@ -291,8 +290,8 @@ final class FollowSeriesCache {
         }
         if (!item.sid.equals(plan.seriesId) || !item.vid.equals(plan.vid) || !quality.equals(plan.requestedQuality))
             throw new java.io.IOException("片源身份不匹配");
-        // Never store a frame size the codec will hard-reject (e.g. 1080x1924 variants).
-        if (PlaybackSources.beyondDecoderEdge(plan.width, plan.height)) throw new UnplayableException();
+        // Oversized frames route through the libVLC software decoder at play time;
+        // the store keeps the best tier regardless of the hardware codec's edge.
         final PlaybackSources.Plan transfer = plan;
         File ready = policy.fetch(item.sid, MediaQuality.cacheVid(item.vid, quality), item.index, transfer.url,
             (value, file, max) -> {
@@ -302,8 +301,6 @@ final class FollowSeriesCache {
                 PlaybackSources.downloadProgressive(transfer, file, max);
             });
         String problem = ready == null ? "未取得文件" : StagedMediaCheck.firstSampleProblem(ready);
-        int edge = ready == null ? 0 : StagedMediaCheck.codedVideoEdge(ready);
-        if (problem == null && edge > PlaybackSources.MAX_DECODER_EDGE) problem = "尺寸超上限";
         if (problem == null) {
             synchronized (lock) { failures.remove(item.vid); }
             return;

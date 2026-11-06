@@ -213,7 +213,7 @@ final class PlaybackSources {
      *  anyway) but the Hisilicon OMX configure stage then hangs with no callback —
      *  infinite buffering until our watchdog descends. Verified against media3 1.4.1
      *  source; no application-level bypass exists, so these frames are gated here. */
-    static final boolean ALLOW_OVERSIZED_HEVC = true; // EXPERIMENT: configure-dims clamp in MediaVideoView
+    static final boolean ALLOW_OVERSIZED_HEVC = true; // Software decode via libVLC covers oversized frames
     static final int MAX_DECODER_EDGE = 1920;
     static boolean beyondDecoderEdge(int width, int height) {
         if (ALLOW_OVERSIZED_HEVC) return false;

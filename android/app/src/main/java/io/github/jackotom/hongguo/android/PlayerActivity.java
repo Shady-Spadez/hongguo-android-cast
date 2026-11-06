@@ -102,6 +102,7 @@ public final class PlayerActivity extends Activity {
     private int resumeAt;
     private boolean prepared, completed, active, userPaused, dragging, protectedCurrent;
     private boolean silentAdvance; // auto-advance keeps the HUD hidden end to end
+    private boolean softwareDecodeThisEpisode; // oversized frame edge: route to libVLC
     private final java.util.HashMap<String,Integer> poisonCounts = new java.util.HashMap<>();
     static final class MediaContentPoisonedException extends java.io.IOException { MediaContentPoisonedException(String message) { super(message); } }
     private boolean surfaceRecoveryArmed = true;
@@ -636,17 +637,10 @@ public final class PlayerActivity extends Activity {
                 // CENC plans stage through a decrypting mirror (PlaybackSources.downloadProgressive):
                 // the .part always carries a plaintext head, so encrypted and clear episodes
                 // alike start playback from the first buffered megabytes.
-                PlaybackSources.requireDecodable(media.plan);
                 File ready = awaitStagedHead(cache.stagingPart(media.seriesId, stageVid, stageIndex, media.plan, stageQuality), 2L * 1024 * 1024, staging);
-                String sampleProblem = localFileProblem(ready);
-                if (sampleProblem != null && StagedMediaCheck.firstSampleProblem(ready) == null) {
-                    // Only the size gate tripped (the content is fine): stop the transfer
-                    // and descend immediately instead of handing Media3 a frame it will
-                    // hard-reject with no codec ever initializing.
-                    staging.cancel(true);
-                    try { cache.invalidate(media.seriesId, stageVid, stageIndex, stageQuality, ceiling); } catch (Exception ignored) { }
-                    throw new PlaybackSources.QualityUnavailableException(sampleProblem);
-                }
+                // Software-decode route for oversized CDN variants: the codec hard-rejects
+                // frames above 1920, so libVLC decodes them in software.
+                softwareDecodeThisEpisode = PlaybackSources.beyondDecoderEdge(media.plan.width, media.plan.height);
                 if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
@@ -661,7 +655,7 @@ public final class PlayerActivity extends Activity {
                     if (poisoned >= 2) throw new MediaContentPoisonedException("红果片源服务异常，内容校验已连续失败（" + sampleProblem + "）。已清除损坏缓存，请稍后再试");
                     throw new java.io.IOException("片源内容损坏（" + sampleProblem + "），已清除缓存并重试");
                 }
-                media.uri = Uri.fromFile(ready); media.kind = "片源已准备 · 缓存播放"; media.cached = true;
+                media.uri = Uri.fromFile(ready); media.kind = softwareDecodeThisEpisode ? "软解 1080p · 缓存播放" : "片源已准备 · 缓存播放"; media.cached = true;
                 media.staging = ready.getName().endsWith(".part") ? staging : null;
             }
             success = true; return media;
@@ -692,6 +686,7 @@ public final class PlayerActivity extends Activity {
         }
         return null;
     }
+    static { /* ALLOW_OVERSIZED_HEVC is compile-time true with the VLC software-decode path. */ }
     private static int stageCeiling(String quality, int maximumEdge) {
         int fixed = AdaptiveQuality.ceiling(quality);
         // Public 720p/1080p preferences retain their established minimum semantics.
@@ -826,7 +821,7 @@ public final class PlayerActivity extends Activity {
                     });
                     Map<String, String> headers = new HashMap<>();
                     headers.put("User-Agent", media.plan == null ? NetworkGuard.UA : media.plan.userAgent); headers.put("Referer", media.plan == null ? NetworkGuard.REFERER : media.plan.referer);
-                    try { armPreparationTimeout(token, targetView); targetView.setVideoURI(media.uri, headers, media.staging); media.staging = null; }
+                    try { armPreparationTimeout(token, targetView); targetView.setSoftwareDecode(softwareDecodeThisEpisode); targetView.setVideoURI(media.uri, headers, media.staging); media.staging = null; }
                     catch (RuntimeException error) { failCurrentMedia(token, "设备打开视频未成功：" + error.getMessage(), false); }
                 });
             } catch (Exception error) { main.post(() -> playbackError(token, recovering ? "自动恢复未成功：" + error.getMessage() + "；原错误：" + lastMediaError : error.getMessage())); }
