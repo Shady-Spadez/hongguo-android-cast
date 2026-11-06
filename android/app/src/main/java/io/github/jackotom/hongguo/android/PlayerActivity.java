@@ -649,6 +649,8 @@ public final class PlayerActivity extends Activity {
                 vlcRetryPending = false;
                 if (softwareDecodeThisEpisode && ready.getName().endsWith(".part"))
                     ready = staging.get(); // follow through to the renamed final file
+                String sampleProblem = localFileProblem(ready);
+                if (sampleProblem != null) {
                     // Upstream content incident: complete files whose moov is valid but
                     // whose mdat is scrambled. Stop instead of feeding the player garbage,
                     // cancel the transfer, and clear the entry so recovery re-fetches.
