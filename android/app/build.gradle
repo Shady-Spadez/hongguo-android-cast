@@ -24,10 +24,10 @@ android {
         applicationId 'io.github.jackotom.hongguo.android'
         minSdk 26
         targetSdk 35
-        versionCode 79
-        versionName '0.12.50'
+        versionCode 80
+        versionName '0.12.51'
         // The hi3751 is ARMv7 only; this also keeps the libVLC native footprint to one ABI.
-        ndk { abiFilters 'armeabi-v7a' }
+        
     }
     flavorDimensions 'device'
     productFlavors {
@@ -83,7 +83,4 @@ dependencies {
     // Guava is jarjar-renamed, so the ancient Guava on this ROM's boot classpath
     // (/system/framework/libsetting.jar) cannot shadow it at runtime.
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
-    // Software HEVC fallback: the hi3751 codec rejects 1080x1924 CDN variants outright
-    // (pipeline spins without producing a frame); libVLC decodes them in software.
-    implementation 'org.videolan.android:libvlc-all:3.5.1'
 }

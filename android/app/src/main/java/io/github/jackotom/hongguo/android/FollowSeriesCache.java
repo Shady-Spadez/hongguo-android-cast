@@ -75,11 +75,12 @@ final class FollowSeriesCache {
         policy = new PlaybackCachePolicy(directory, BUDGET_BYTES, MAX_FILE_BYTES, PlaybackSources::downloadProgressive);
         SharedPreferences prefs = preferences();
         enabled = prefs.getBoolean("enabled", true);
-        if (prefs.getInt("schema", 1) < 3) {
-            // Schema 3 stores the best tier: oversized frames route through libVLC's
-            // software decoder, so the hardware codec's 1920 edge no longer gates storage.
+        if (prefs.getInt("schema", 1) < 4) {
+            // Schema 4: back to decoder-gated storage. The VLC software decode
+            // experiment confirmed the hi3751's GPU/codec pair cannot handle oversized
+            // frames at either level; store only what the hardware plays.
             try { policy.clear(); } catch (Exception ignored) { }
-            prefs.edit().putInt("schema", 3).remove("registry").apply();
+            prefs.edit().putInt("schema", 4).remove("registry").apply();
         }
     }
 
