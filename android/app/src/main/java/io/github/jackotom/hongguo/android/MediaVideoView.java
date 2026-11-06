@@ -212,16 +212,8 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                             else notifyInfo(MediaPlayer.MEDIA_INFO_BUFFERING_START);
                             break;
                         case org.videolan.libvlc.MediaPlayer.Event.Vout:
-                            if (event.voutCount > 0) {
-                                org.videolan.libvlc.MediaPlayer.TrackDescription[] tracks = player.getVideoTracks();
-                                if (tracks != null) for (org.videolan.libvlc.MediaPlayer.TrackDescription track : tracks) {
-                                    if (player.getVideoTrack() == track.id && track.size != null) {
-                                        int w = (int) track.size.getWidth(), h = (int) track.size.getHeight();
-                                        if (w > 0 && h > 0) { videoWidth = w; videoHeight = h; requestLayout(); }
-                                        break;
-                                    }
-                                }
-                            }
+                            // Video dimensions come from the container metadata (PlayerActivity
+                            // already knows them); the aspect-fit layout uses those values.
                             break;
                     }
                 });
