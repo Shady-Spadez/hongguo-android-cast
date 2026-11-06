@@ -216,7 +216,6 @@ final class PlaybackSources {
     static final boolean ALLOW_OVERSIZED_HEVC = true; // Software decode via libVLC covers oversized frames
     static final int MAX_DECODER_EDGE = 1920;
     static boolean beyondDecoderEdge(int width, int height) {
-        if (ALLOW_OVERSIZED_HEVC) return false;
         return width > 0 && height > 0 && Math.max(width, Math.max(height, 1)) > MAX_DECODER_EDGE;
     }
     /** Reject plans the device can never decode before any bytes are staged. */
