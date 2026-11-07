@@ -20,8 +20,12 @@ contextBridge.exposeInMainWorld('AndroidCrypto', {
   // 安卓 JNI 为同步契约：hash/解密都是小数据，走 sendSync。
   process: text => ipcRenderer.sendSync('android-crypto-sync', JSON.parse(text)),
 });
+contextBridge.exposeInMainWorld('AndroidUpdates', {
+  postMessage: text => { ipcRenderer.send('android-updates-rpc', JSON.parse(text)); },
+});
 contextBridge.exposeInMainWorld('HongguoPlayer', {
   onSession: handler => ipcRenderer.on('player-session', (_event, payload) => handler(payload)),
+  onDownloadProgress: handler => ipcRenderer.on('player-download-progress', (_event, progress) => handler(progress)),
   resolve: async payload => {
     // 主进程 handler 直接返回解析结果（异常会以 rejected promise 形式抛出）。
     const result = await ipcRenderer.invoke('player-resolve', payload);

@@ -79,7 +79,7 @@ async function prepareDecryptedMedia(playInfo, { axios, signal, maxBytes } = {})
  * 明文源流式直写；CENC（contentKey）与 spadeA 在本模块内校验密钥并解密。
  * 返回 {bytes}。调用方只传播放信息对象与目标路径。
  */
-async function downloadEpisodeToFile(playInfo, destination, { axios, signal } = {}) {
+async function downloadEpisodeToFile(playInfo, destination, { axios, signal, onProgress } = {}) {
   const axiosGet = axios && axios.get ? axios.get : require('axios').get;
   const limit = 500 * 1024 * 1024;
   const url = String(playInfo && playInfo.url || '');
@@ -93,6 +93,11 @@ async function downloadEpisodeToFile(playInfo, destination, { axios, signal } = 
   });
   const total = Number(response.headers['content-length']) || 0;
   if (total > limit) { response.data.destroy(); throw new Error('本集过大，请下载后播放'); }
+  let progressAt = 0, received = 0;
+  response.data.on('data', chunk => {
+    received += chunk.length;
+    if (onProgress && Date.now() - progressAt >= 200) { progressAt = Date.now(); try { onProgress(received, total); } catch { } }
+  });
   const fsp = require('fs/promises');
   const pipeline = require('stream/promises').pipeline;
   // 临时名必须唯一：预取与手动切集可能同时下载同一集，共用固定名会互相覆盖，
@@ -129,4 +134,20 @@ async function downloadEpisodeToFile(playInfo, destination, { axios, signal } = 
   }
 }
 
-module.exports = { decryptCencFile, ffmpegExecutable, prepareDecryptedMedia, downloadEpisodeToFile };
+/**
+ * 流式解密会话：ffmpeg 从加密转发端点实时拉流解密，输出增长中的解密文件。
+ * 返回 { proc, decPath }；调用方经 hkplay 供给该文件（挂起等待解密进度）。
+ */
+function startStreamDecryptSession({ inputUrl, contentKey, decPath, onLog }) {
+  const key = String(contentKey || '');
+  if (!/^[a-f\d]{32}$/i.test(key)) throw new Error('片源解密密钥格式无效');
+  const { spawn } = require('child_process');
+  const args = ['-y', '-hide_banner', '-loglevel', 'error', '-decryption_key', key,
+    '-i', String(inputUrl), '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', String(decPath)];
+  const child = spawn(ffmpegExecutable(), args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', c => { stderr += c; if (onLog && stderr.length < 4000) onLog(String(c)); });
+  return { proc: child, decPath, stderrTail: () => stderr.slice(0, 200) };
+}
+
+module.exports = { decryptCencFile, ffmpegExecutable, prepareDecryptedMedia, downloadEpisodeToFile, startStreamDecryptSession };
