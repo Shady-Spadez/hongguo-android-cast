@@ -56,6 +56,7 @@ public final class PlayerActivity extends Activity {
     private FrameLayout overlayRoot;
     private TextView hintView; private Runnable hideHint;
     private FrameLayout rotatedMenu; private int screenRotation; private boolean portraitHintShown;
+    private LinearLayout actionsRow, optionsRow; private boolean rowsSplit;
     private DlnaCastService castService;
     private BrowserCastService browserCastService;
     private boolean browserCastBound, browserCastSelected, showBrowserPairWhenReady;
@@ -274,6 +275,7 @@ public final class PlayerActivity extends Activity {
             options.addView(rotateButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         }
         content.addView(options); phoneOptions = BuildConfig.IS_TV ? null : options;
+        if (BuildConfig.IS_TV) { actionsRow = actions; optionsRow = options; }
         overlayRoot.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
         // In-layout hint replaces the system Toast while rotated (toasts render unrotated).
         hintView = new TextView(this); hintView.setTextColor(0xffffffff); hintView.setTextSize(15);
@@ -434,6 +436,38 @@ public final class PlayerActivity extends Activity {
         }
         if (danmakuOverlay != null) danmakuOverlay.setVerticalScroll(rotated ? screenRotation : 0);
         if (rotateButton != null) updateRotateButton();
+        if (BuildConfig.IS_TV && rotated != rowsSplit) { rowsSplit = rotated; reflowHudRows(rotated); }
+    }
+    /** Portrait projection halves the logical width (1920 -> 1080): the single weighted rows
+     *  clip their last buttons, so each row re-groups into two stacked half-rows and the
+     *  container turns vertical. The unrotated layout restores the original single rows. */
+    private void reflowHudRows(boolean split) {
+        if (actionsRow == null || optionsRow == null) return;
+        regroupRow(actionsRow, split, dp(50), episodeActions, 3);
+        Button[] optionButtons = rotateButton == null
+            ? new Button[]{qualityButton, speedButton, danmakuButton}
+            : new Button[]{qualityButton, speedButton, danmakuButton, rotateButton};
+        regroupRow(optionsRow, split, dp(46), optionButtons, 2);
+    }
+    private void regroupRow(LinearLayout row, boolean split, int buttonHeight, Button[] buttons, int perRow) {
+        LinearLayout parent = (LinearLayout) row.getParent();
+        int index = parent.indexOfChild(row);
+        if (!split) perRow = buttons.length;
+        row.removeAllViews();
+        row.setOrientation(LinearLayout.VERTICAL);
+        for (int start = 0; start < buttons.length; start += perRow) {
+            LinearLayout line = new LinearLayout(this);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            int end = Math.min(buttons.length, start + perRow);
+            for (int i = start; i < end; i++) line.addView(buttons[i], new LinearLayout.LayoutParams(0, buttonHeight, 1));
+            row.addView(line, new LinearLayout.LayoutParams(-1, -2));
+        }
+        // The container built the row as horizontal with weighted children; after the regroup
+        // the wrapper row owns the layout params, so refresh them for the vertical case.
+        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) row.getLayoutParams();
+        params.height = -2; params.weight = 0;
+        row.setLayoutParams(params);
+        parent.requestLayout();
     }
     private void applyScreenRotation(int degrees, boolean restartPlayback) {
         int value = degrees == 90 || degrees == 270 ? degrees : 0;
