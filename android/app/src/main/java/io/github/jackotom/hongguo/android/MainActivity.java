@@ -84,9 +84,28 @@ public final class MainActivity extends Activity {
         }
         setContentView(container);
         container.requestApplyInsets();
+        applyScreenRotation();
         PlaybackSources.attach(this);
         startWebView(softwareRendering);
     }
+    /** Portrait projection: rotate the whole web container so browsing reads upright on the
+     *  sideways wall. The WebView re-lays out at portrait dimensions, so the responsive page
+     *  reflows natively; focus navigation runs on layout rects and keeps matching the remote. */
+    private void applyScreenRotation() {
+        if (!BuildConfig.IS_TV || webContainer == null) return;
+        int degrees = 0;
+        try { degrees = Integer.parseInt(PlayerOptions.read(this).getString("screenRotation")); } catch (Exception ignored) { }
+        if (degrees != 90 && degrees != 270) degrees = 0;
+        if (degrees == 0) {
+            webContainer.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+            webContainer.setRotation(0);
+        } else {
+            android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+            webContainer.setLayoutParams(new FrameLayout.LayoutParams(Math.max(1, metrics.heightPixels), Math.max(1, metrics.widthPixels), Gravity.CENTER));
+            webContainer.setRotation(degrees);
+        }
+    }
+    void applyScreenRotationOnUiThread() { runOnUiThread(this::applyScreenRotation); }
     private void startWebView(boolean useSoftware) {
         cancelStartupTimeout();
         loaded = false;
@@ -316,7 +335,7 @@ public final class MainActivity extends Activity {
     private static WebResourceResponse error(int status) { return new WebResourceResponse("text/plain", "UTF-8", status, "Blocked", Collections.emptyMap(), new ByteArrayInputStream(new byte[0])); }
     boolean trusted() { return web != null && web.getUrl() != null && local(Uri.parse(web.getUrl())); }
     void script(String source) { runOnUiThread(() -> { if (!isFinishing() && trusted()) web.evaluateJavascript(source, null); }); }
-    @Override protected void onResume() { super.onResume(); if (officialSeries != null) officialSeries.resume(); if (updates != null) updates.resume(); AccountSync.get().setListener(accountChanged); AccountSync.get().foreground(); if (web != null) { web.onResume(); if (loaded) script("window.__androidResume && window.__androidResume()"); } }
+    @Override protected void onResume() { super.onResume(); applyScreenRotation(); if (officialSeries != null) officialSeries.resume(); if (updates != null) updates.resume(); AccountSync.get().setListener(accountChanged); AccountSync.get().foreground(); if (web != null) { web.onResume(); if (loaded) script("window.__androidResume && window.__androidResume()"); } }
     @Override protected void onPause() { if (updates != null) updates.pause(); AccountSync.get().flush(); if (web != null) web.onPause(); super.onPause(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (BuildConfig.IS_TV && event.getKeyCode() == KeyEvent.KEYCODE_MENU) {

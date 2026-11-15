@@ -50,7 +50,12 @@ public final class PlayerActivity extends Activity {
     private int hudDialogs, wakeKey = KeyEvent.KEYCODE_UNKNOWN;
     private SeekBar seek;
     private Button previous, toggle, next, autoplayButton, qualityButton, speedButton;
+    private Button rotateButton;
     private Button castButton;
+    /** Portrait projection: overlays live in this rotated layer while the SurfaceView stays put. */
+    private FrameLayout overlayRoot;
+    private TextView hintView; private Runnable hideHint;
+    private FrameLayout rotatedMenu; private int screenRotation; private boolean portraitHintShown;
     private DlnaCastService castService;
     private BrowserCastService browserCastService;
     private boolean browserCastBound, browserCastSelected, showBrowserPairWhenReady;
@@ -164,6 +169,10 @@ public final class PlayerActivity extends Activity {
             boolean restored = restoreSelection(state);
             series = owner(queue.get(current));
             buildViews();
+            try { screenRotation = Integer.parseInt(defaults.getString("screenRotation")); } catch (RuntimeException ignored) { screenRotation = 0; }
+            if (screenRotation != 90 && screenRotation != 270) screenRotation = 0;
+            video.setScreenRotation(screenRotation);
+            applyRotationOverlay();
             int position = restored ? Math.max(0, state.getInt("position")) : store.position(series, queue.get(current));
             String initial = state == null ? getIntent().getStringExtra("url") : null;
             loadAt(current, initial, position, restored && state.getBoolean("userPaused", false));
@@ -197,17 +206,23 @@ public final class PlayerActivity extends Activity {
         video = new MediaVideoView(this); video.setFocusable(true); video.setFocusableInTouchMode(true);
         root.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         installVideoTouch(video);
+        // Overlays ride in a rotatable layer: view rotation moves focus-space stays intact
+        // (FocusFinder works on layout rects while only rendering rotates), and the
+        // SurfaceView must never sit inside the transform — its layer is composited by
+        // the hardware composer and rotated by the decoder's native-window transform.
+        overlayRoot = new FrameLayout(this);
+        root.addView(overlayRoot, new FrameLayout.LayoutParams(-1, -1));
         danmakuOverlay = new DanmakuOverlay(this, new DanmakuOverlay.Clock() {
             public long position() { return prepared && video != null ? Math.max(0, video.getCurrentPosition()) : Math.max(0, resumeAt); }
             public boolean playing() { return active && prepared && !completed && !userPaused && !buffering && !dragging && !casting() && !castWasActive && video != null && video.isPlaying(); }
         });
-        root.addView(danmakuOverlay, new FrameLayout.LayoutParams(-1, -1));
+        overlayRoot.addView(danmakuOverlay, new FrameLayout.LayoutParams(-1, -1));
         // Faint wall clock for immersive viewing; visibility flips with the HUD below.
         clockView = label(17); clockView.setTextColor(0x8cffffff); clockView.setShadowLayer(2, 1, 1, 0x99000000);
         FrameLayout.LayoutParams clockLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
         clockLayout.topMargin = dp(8); clockLayout.rightMargin = dp(16);
         clockView.setVisibility(View.GONE);
-        root.addView(clockView, clockLayout);
+        overlayRoot.addView(clockView, clockLayout);
         danmaku = new DanmakuController(this, main, danmakuOverlay, value -> { danmakuNotice = value; updateDanmakuButton(); });
         top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL); top.setPadding(dp(8), dp(8), dp(8), dp(8)); top.setBackgroundColor(0xbb101014);
         back = button("‹ 返回", this::exitPlayer);
@@ -215,7 +230,7 @@ public final class PlayerActivity extends Activity {
         heading = new LinearLayout(this); heading.setOrientation(LinearLayout.VERTICAL); heading.setPadding(dp(8), 0, 0, 0);
         title = label(BuildConfig.IS_TV ? 20 : 17); title.setMaxLines(1); status = label(12); status.setMaxLines(2);
         heading.addView(title); heading.addView(status); top.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        root.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        overlayRoot.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
         bottom = new LinearLayout(this); bottom.setOrientation(LinearLayout.VERTICAL); bottom.setBackgroundColor(0xcc101014);
         LinearLayout content = bottom;
         if (BuildConfig.IS_TV) bottom.setPadding(dp(10), dp(8), dp(10), dp(12));
@@ -254,8 +269,20 @@ public final class PlayerActivity extends Activity {
         options.addView(speedButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         danmakuButton = button("弹幕 关", this::toggleDanmaku);
         options.addView(danmakuButton, new LinearLayout.LayoutParams(0, dp(46), 1)); updateDanmakuButton();
+        if (BuildConfig.IS_TV) {
+            rotateButton = button("旋转 关", this::cycleScreenRotation);
+            options.addView(rotateButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        }
         content.addView(options); phoneOptions = BuildConfig.IS_TV ? null : options;
-        root.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        overlayRoot.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        // In-layout hint replaces the system Toast while rotated (toasts render unrotated).
+        hintView = new TextView(this); hintView.setTextColor(0xffffffff); hintView.setTextSize(15);
+        hintView.setGravity(Gravity.CENTER); hintView.setBackgroundColor(0xcc26282e);
+        hintView.setPadding(dp(14), dp(10), dp(14), dp(10));
+        hintView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams hintLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        hintLayout.bottomMargin = dp(168);
+        overlayRoot.addView(hintView, hintLayout);
         setContentView(root);
         if (!BuildConfig.IS_TV) installPhoneLayout();
         controlsHud = new PlayerHud(new PlayerHud.Scheduler() {
@@ -361,7 +388,7 @@ public final class PlayerActivity extends Activity {
                 if (Math.abs(dy) >= dp(72) && Math.abs(dy) >= Math.abs(dx) * 2) {
                     if (dy < 0 && current + 1 < queue.size()) { move(1); return true; }
                     if (dy > 0 && current > 0) { move(-1); return true; }
-                    Toast.makeText(this, dy < 0 ? "已经是最后一集" : "已经是第一集", Toast.LENGTH_SHORT).show();
+                    showHint(dy < 0 ? "已经是最后一集" : "已经是第一集", false);
                 }
             }
             return true;
@@ -389,6 +416,119 @@ public final class PlayerActivity extends Activity {
         ++hudDialogs; showControls();
         dialog.setOnDismissListener(ignored -> { hudDialogs = Math.max(0, hudDialogs - 1); showControls(); });
         dialog.show();
+    }
+    /** Portrait projection: rotate every overlay 90/270 inside the fixed landscape window.
+     *  Input semantics survive untouched because focus navigation runs on layout rects
+     *  while only rendering rotates. The decoder side rewrites tkhd on the next open. */
+    private void applyRotationOverlay() {
+        if (overlayRoot == null) return;
+        boolean rotated = BuildConfig.IS_TV && (screenRotation == 90 || screenRotation == 270);
+        if (rotated) {
+            // Layout the layer at portrait dimensions; rotating about its center covers the window.
+            android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+            overlayRoot.setLayoutParams(new FrameLayout.LayoutParams(Math.max(1, metrics.heightPixels), Math.max(1, metrics.widthPixels), Gravity.CENTER));
+            overlayRoot.setRotation(screenRotation);
+        } else {
+            overlayRoot.setLayoutParams(new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+            overlayRoot.setRotation(0);
+        }
+        if (danmakuOverlay != null) danmakuOverlay.setVerticalScroll(rotated ? screenRotation : 0);
+        if (rotateButton != null) updateRotateButton();
+    }
+    private void applyScreenRotation(int degrees, boolean restartPlayback) {
+        int value = degrees == 90 || degrees == 270 ? degrees : 0;
+        boolean changed = value != screenRotation;
+        screenRotation = value;
+        if (video != null) video.setScreenRotation(value);
+        applyRotationOverlay();
+        if (restartPlayback && changed && prepared && !destroyed && episode != null && !casting()) {
+            // Rotation rides in the codec configuration: reload the same episode in place.
+            int position = completed ? 0 : Math.max(0, video.getCurrentPosition());
+            loadAt(current, null, position, userPaused || !video.isPlaying());
+        }
+        showControls();
+    }
+    private void updateRotateButton() {
+        if (rotateButton == null) return;
+        rotateButton.setText(screenRotation == 0 ? "旋转 关" : "旋转 " + screenRotation + "°");
+        rotateButton.setContentDescription(rotateButton.getText());
+    }
+    private void cycleScreenRotation() {
+        int next = screenRotation == 0 ? 90 : screenRotation == 90 ? 270 : 0;
+        try {
+            PlayerOptions.update(this, new JSONObject().put("screenRotation", Integer.toString(next)));
+        } catch (Exception error) {
+            showHint("画面旋转保存未成功：" + error.getMessage(), true);
+            return;
+        }
+        applyScreenRotation(next, true);
+        showHint(next == 0 ? "画面旋转已关闭" : "竖屏投影 " + next + "°：请将投影仪侧放，先关闭自动梯形校正", false);
+    }
+    /** System toasts and dialogs render unrotated; while in portrait projection show the
+     *  hint inside the rotated layer so text stays upright on the wall. */
+    private void showHint(String text, boolean longish) {
+        if (hintView == null || !BuildConfig.IS_TV || screenRotation == 0) {
+            Toast.makeText(this, text, longish ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT).show();
+            return;
+        }
+        hintView.setText(text); hintView.setVisibility(View.VISIBLE);
+        if (hideHint != null) main.removeCallbacks(hideHint);
+        hideHint = () -> { if (hintView != null) hintView.setVisibility(View.GONE); hideHint = null; };
+        main.postDelayed(hideHint, longish ? 4200 : 2600);
+    }
+    private interface MenuPick { void pick(int index); }
+    /** A portrait drama on an unrotated screen is exactly the case portrait projection
+     *  exists for; surface the option once per session instead of leaving it buried. */
+    private void maybeHintPortrait(int width, int height) {
+        if (portraitHintShown || screenRotation != 0 || !BuildConfig.IS_TV || width <= 0 || height <= 0 || width >= height) return;
+        portraitHintShown = true;
+        showHint("竖屏内容：菜单「旋转」可开启竖屏投影", false);
+    }
+    /** Single-choice player menu that stays upright on the wall: the system AlertDialog
+     *  ignores the window's view transforms, so portrait projection draws its own list. */
+    private void showPlayerMenu(String titleText, String[] labels, int selected, MenuPick picker) {
+        if (BuildConfig.IS_TV && screenRotation != 0) { openRotatedMenu(titleText, labels, selected, picker); return; }
+        showPlayerDialog(new AlertDialog.Builder(this).setTitle(titleText).setSingleChoiceItems(labels, selected, (dialog, which) -> {
+            dialog.dismiss(); picker.pick(which);
+        }).setNegativeButton("关闭", null).create());
+    }
+    private void openRotatedMenu(String titleText, String[] labels, int selected, MenuPick picker) {
+        closeRotatedMenu();
+        LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(0xf0101014); panel.setPadding(dp(18), dp(14), dp(18), dp(16));
+        TextView menuTitle = label(18); menuTitle.setText(titleText); menuTitle.setPadding(0, 0, 0, dp(10));
+        panel.addView(menuTitle, new LinearLayout.LayoutParams(-1, -2));
+        ScrollView scroller = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this); list.setOrientation(LinearLayout.VERTICAL);
+        Button focusTarget = null;
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            Button item = button(labels[i], () -> { closeRotatedMenu(); picker.pick(index); });
+            if (i == selected) { item.setTextColor(0xffffca28); focusTarget = item; }
+            list.addView(item, new LinearLayout.LayoutParams(-1, dp(50)));
+        }
+        scroller.addView(list, new ScrollView.LayoutParams(-1, -2));
+        panel.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
+        Button close = button("关闭", this::closeRotatedMenu);
+        panel.addView(close, new LinearLayout.LayoutParams(-1, dp(50)));
+        FrameLayout menu = new FrameLayout(this);
+        menu.setBackgroundColor(0x88000000);
+        menu.setClickable(true); menu.setFocusable(true);
+        menu.setOnClickListener(view -> closeRotatedMenu());
+        FrameLayout.LayoutParams panelLayout = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
+        panelLayout.width = Math.min(dp(560), overlayRoot.getWidth() - dp(48));
+        panelLayout.height = Math.round(overlayRoot.getHeight() * 0.72f);
+        menu.addView(panel, panelLayout);
+        rotatedMenu = menu;
+        ++hudDialogs; showControls();
+        overlayRoot.addView(menu, new FrameLayout.LayoutParams(-1, -1));
+        (focusTarget != null ? focusTarget : close).requestFocus();
+    }
+    private void closeRotatedMenu() {
+        if (rotatedMenu == null) return;
+        FrameLayout menu = rotatedMenu; rotatedMenu = null;
+        overlayRoot.removeView(menu);
+        hudDialogs = Math.max(0, hudDialogs - 1); showControls();
     }
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
@@ -813,9 +953,9 @@ public final class PlayerActivity extends Activity {
                         synchronized (poisonCounts) { poisonCounts.remove(target.optString("vid")); } // healthy fetch: any earlier poison is forgiven
                         watchProgressSeeks(token, targetView);
                         videoWidth = player.getVideoWidth(); videoHeight = player.getVideoHeight();
-                        player.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
+                        player.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == targetView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); maybeHintPortrait(width, height); } });
                         try { targetView.setPlaybackSpeed(requestedSpeed); actualSpeed = targetView.playbackSpeed(); }
-                        catch (RuntimeException error) { actualSpeed = targetView.playbackSpeed(); Toast.makeText(this, "设备未接受倍速设置，当前速度以播放器确认为准", Toast.LENGTH_LONG).show(); }
+                        catch (RuntimeException error) { actualSpeed = targetView.playbackSpeed(); showHint("设备未接受倍速设置，当前速度以播放器确认为准", true); }
                         if (resumeAt > 0 && (video.getDuration() <= 0 || resumeAt < video.getDuration() - 1500)) video.seekTo(resumeAt);
                         if (active && !userPaused) video.start();
                         recordProgress(targetSeries, target, resumeAt); renderStatus(); updateButtons();
@@ -906,18 +1046,18 @@ public final class PlayerActivity extends Activity {
         if (!prepared || mediaPlayer == null) return;
         String[] labels = new String[PlayerOptions.SPEEDS.length]; int selected = -1;
         for (int i = 0; i < labels.length; i++) { labels[i] = rateLabel(PlayerOptions.SPEEDS[i]); if (Math.abs(actualSpeed - PlayerOptions.SPEEDS[i]) < .001f) selected = i; }
-        showPlayerDialog(new AlertDialog.Builder(this).setTitle("播放倍速 · 设备实际确认").setSingleChoiceItems(labels, selected, (dialog, which) -> {
-            dialog.dismiss(); if (!prepared || mediaPlayer == null) return;
-            float before = mediaPlayer.playbackSpeed(); boolean wasPlaying = video.isPlaying();
+        showPlayerMenu("播放倍速 · 设备实际确认", labels, selected, which -> {
+            if (!prepared || mediaPlayer == null) return;
+            float before = mediaPlayer.playbackSpeed();
             try {
                 mediaPlayer.setPlaybackSpeed(PlayerOptions.SPEEDS[which]);
                 float accepted = mediaPlayer.playbackSpeed();
                 try { PlayerOptions.update(this, new JSONObject().put("speed", (double) accepted)); }
                 catch (Exception error) { if (Float.isFinite(before)) mediaPlayer.setPlaybackSpeed(before); throw error; }
                 requestedSpeed = accepted; actualSpeed = accepted;
-            } catch (Exception error) { actualSpeed = mediaPlayer.playbackSpeed(); Toast.makeText(this, "倍速设置未成功：" + error.getMessage(), Toast.LENGTH_LONG).show(); }
+            } catch (Exception error) { actualSpeed = mediaPlayer.playbackSpeed(); showHint("倍速设置未成功：" + error.getMessage(), true); }
             updateButtons();
-        }).setNegativeButton("关闭", null).create());
+        });
     }
     private static final class QualitySwitch {
         final int generation, serial; int ceiling, observedShortEdge; final String quality; final JSONObject episode; final PlaybackCache.QueueWindow window;
@@ -939,15 +1079,15 @@ public final class PlayerActivity extends Activity {
     private void failQualitySwitch(QualitySwitch job, String reason) {
         if (!validSwitch(job)) return;
         qualitySwitch = null; releaseSwitch(job); renderStatus(); updateButtons(); showControls();
-        Toast.makeText(this, "保留当前播放；" + qualityLabel(job.quality) + " 切换未成功：" + (reason == null ? "对应片源暂未取得" : reason), Toast.LENGTH_LONG).show();
+        showHint("保留当前播放；" + qualityLabel(job.quality) + " 切换未成功：" + (reason == null ? "对应片源暂未取得" : reason), true);
     }
     private void selectQuality() {
         if (!prepared || offline) return;
         String[] values = { "auto", "720p", "1080p" }, labels = { "自动 · 可用片源", "720p · 实际短边至少 720", "1080p · 实际短边至少 1080" };
         int selected = Arrays.asList(values).indexOf(quality);
-        showPlayerDialog(new AlertDialog.Builder(this).setTitle("清晰度 · 先准备，成功后切换").setSingleChoiceItems(labels, selected, (dialog, which) -> {
-            dialog.dismiss(); if (!values[which].equals(quality) || !values[which].equals(actualQuality) || qualitySwitch != null) switchQuality(values[which]);
-        }).setNegativeButton("关闭", null).create());
+        showPlayerMenu("清晰度 · 先准备，成功后切换", labels, selected, which -> {
+            if (!values[which].equals(quality) || !values[which].equals(actualQuality) || qualitySwitch != null) switchQuality(values[which]);
+        });
     }
     private void switchQuality(String requested) {
         if (!prepared || offline || destroyed) return;
@@ -977,7 +1117,7 @@ public final class PlayerActivity extends Activity {
         if (!validSwitch(job)) return;
         // The current decoder stays above the candidate until prepare/seek/rate all succeed.
         final PreparedMedia stageMedia = job.media;
-        MediaVideoView candidate = new MediaVideoView(this); job.view = candidate; candidate.setFocusable(true); candidate.setFocusableInTouchMode(true); installVideoTouch(candidate);
+        MediaVideoView candidate = new MediaVideoView(this); job.view = candidate; candidate.setFocusable(true); candidate.setFocusableInTouchMode(true); candidate.setScreenRotation(screenRotation); installVideoTouch(candidate);
         playerRoot.addView(candidate, 0, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         job.timeout = () -> { if (!validCandidate(job, candidate, stageMedia)) return; if (!lowerQualitySwitch(job, "设备准备或定位超时")) failQualitySwitch(job, "设备准备或定位超时"); }; main.postDelayed(job.timeout, 20000);
         candidate.setOnErrorListener((mp, what, extra) -> { if (!validCandidate(job, candidate, stageMedia)) return true; String reason = "设备解码暂不可用（" + what + "/" + extra + "）"; if (!lowerQualitySwitch(job, reason)) failQualitySwitch(job, reason); return true; });
@@ -1050,7 +1190,7 @@ public final class PlayerActivity extends Activity {
             bindPlayback(video, generation, episode, job.media.remote, actualQuality);
             final MediaVideoView currentView = video; final int token = generation;
             watchProgressSeeks(token, currentView);
-            mediaPlayer.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); } });
+            mediaPlayer.setOnVideoSizeChangedListener((changed, width, height) -> { if (video == currentView && token == generation) { videoWidth = width; videoHeight = height; renderStatus(); maybeHintPortrait(width, height); } });
             currentManual = false; currentCache = job.media.cached; currentWeb = job.media.remote != null;
             currentKind = "清晰度已切换 · " + job.media.kind; renderStatus(); updateButtons(); showControls(); pruneCache();
             if (job.media.remote != null) cacheEpisode(job.media.seriesId, episode, job.media.plan, actualQuality, generation);
@@ -1115,8 +1255,8 @@ public final class PlayerActivity extends Activity {
             danmakuEnabled = PlayerOptions.update(this, new JSONObject().put("danmaku", !danmakuEnabled)).getBoolean("danmaku");
             danmakuNotice = danmakuEnabled ? "正在读取弹幕…" : "弹幕已关闭";
             updateDanmaku(); updateDanmakuButton();
-            Toast.makeText(this, danmakuEnabled ? offline ? "已下载播放不读取在线弹幕" : casting() || castWasActive ? "投屏不显示本机弹幕" : "已开启时间轴弹幕，暂停和拖动跟随视频" : "弹幕已关闭", Toast.LENGTH_SHORT).show();
-        } catch (Exception error) { Toast.makeText(this, "弹幕设置保存未成功", Toast.LENGTH_LONG).show(); }
+            showHint(danmakuEnabled ? offline ? "已下载播放不读取在线弹幕" : casting() || castWasActive ? "投屏不显示本机弹幕" : "已开启时间轴弹幕，暂停和拖动跟随视频" : "弹幕已关闭", false);
+        } catch (Exception error) { showHint("弹幕设置保存未成功", true); }
     }
     private void updateDanmaku() {
         if (danmaku == null || video == null || series == null || episode == null) return;
@@ -1131,9 +1271,7 @@ public final class PlayerActivity extends Activity {
     private void selectEpisode() {
         String[] labels = new String[queue.size()];
         for (int i = 0; i < labels.length; i++) labels[i] = owner(queue.get(i)).optString("title") + " · 第 " + queue.get(i).optInt("index") + " 集" + (i == current ? " · 当前" : "");
-        showPlayerDialog(new AlertDialog.Builder(this).setTitle(offline ? "已下载分集" : "选集 · 逐集核验片源").setSingleChoiceItems(labels, current, (dialog, which) -> {
-            dialog.dismiss(); loadAt(which, null, 0);
-        }).setNegativeButton("关闭", null).create());
+        showPlayerMenu(offline ? "已下载分集" : "选集 · 逐集核验片源", labels, current, which -> loadAt(which, null, 0));
     }
     private void togglePlayback() {
         if (castCommand("toggle", 0)) return;
@@ -1570,7 +1708,7 @@ public final class PlayerActivity extends Activity {
         browserCastService = null;
     }
     private void exitPlayer() { if (controlsHud != null) controlsHud.suspend(); saveProgress(); finish(); }
-    @Override public void onBackPressed() { exitPlayer(); }
+    @Override public void onBackPressed() { if (rotatedMenu != null) { closeRotatedMenu(); return; } exitPlayer(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_UP) exitPlayer(); return true; }
         int key = event.getKeyCode();

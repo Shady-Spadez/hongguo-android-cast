@@ -697,6 +697,8 @@ function About({ info, notify, accountFocus, announcementsRef, followCache }) {
   const [follow, setFollow] = useState({ busy: true });
   const [followToggling, setFollowToggling] = useState(false);
   const [followClearing, setFollowClearing] = useState(false);
+  const [rotation, setRotation] = useState('0');
+  const [rotationBusy, setRotationBusy] = useState(false);
   const mounted = useRef(true);
   const refreshCache = useCallback(async () => {
     try { const result = await nativeCall('getPlaybackCache'); if (mounted.current) setCache({ ...result, busy: false }); }
@@ -706,7 +708,18 @@ function About({ info, notify, accountFocus, announcementsRef, followCache }) {
     try { const result = await nativeCall('getFollowCacheStatus'); if (mounted.current) setFollow({ ...(result || {}), busy: false }); }
     catch (error) { if (mounted.current) setFollow((previous) => ({ ...previous, busy: false, error: errorText(error) })); }
   }, []);
-  useEffect(() => { mounted.current = true; refreshCache(); refreshFollow(); window.addEventListener('androidresume', refreshCache); window.addEventListener('androidresume', refreshFollow); return () => { mounted.current = false; window.removeEventListener('androidresume', refreshCache); window.removeEventListener('androidresume', refreshFollow); }; }, [refreshCache, refreshFollow]);
+  const refreshRotation = useCallback(async () => {
+    try { const result = await nativeCall('getPlaybackOptions'); if (mounted.current) setRotation(String(result.screenRotation || '0')); } catch (error) { /* 读取失败保持当前展示 */ }
+  }, []);
+  useEffect(() => { mounted.current = true; refreshCache(); refreshFollow(); refreshRotation(); window.addEventListener('androidresume', refreshCache); window.addEventListener('androidresume', refreshFollow); window.addEventListener('androidresume', refreshRotation); return () => { mounted.current = false; window.removeEventListener('androidresume', refreshCache); window.removeEventListener('androidresume', refreshFollow); window.removeEventListener('androidresume', refreshRotation); }; }, [refreshCache, refreshFollow, refreshRotation]);
+  const changeRotation = async (value) => {
+    setRotationBusy(true);
+    try {
+      await nativeCall('setPlaybackOptions', { screenRotation: String(value) });
+      if (mounted.current) { setRotation(String(value)); notify(value === '0' ? '画面旋转已关闭' : `竖屏投影已开启（${value}°）：请将投影仪侧放并关闭自动梯形校正`); }
+    } catch (error) { if (mounted.current) notify(errorText(error)); }
+    finally { if (mounted.current) setRotationBusy(false); }
+  };
   const clearCache = async () => {
     setClearing(true);
     try { const result = await nativeCall('clearPlaybackCache'); if (mounted.current) { notify(`已清理 ${result.removed || 0} 个播放缓存 · ${byteText(result.bytes)}`); await refreshCache(); } }
@@ -738,6 +751,7 @@ function About({ info, notify, accountFocus, announcementsRef, followCache }) {
     <section className="about-section"><h2>播放缓存</h2><p className="cache-status" role="status">{cache.busy ? '正在读取缓存…' : typeof cache.files === 'number' ? `${cache.files} 个文件 · ${byteText(cache.bytes)}${cache.budgetBytes ? ` / 预算 ${byteText(cache.budgetBytes)}` : ''}` : '缓存状态暂未读取'}</p><p className="cache-note">自动清理开启时，保留前 1 集和当前集；本机播放预取下一集，投屏连播时依次预缓存后面 5 集，优先下一集，不等待全部缓存再开播。预取与清理均限于当前季，不自动跨季。普通缓存预算 256 MiB，投屏期间 768 MiB，单集上限 96 MiB；容量不足或取源失败时预缓存可能不足 5 集。更早已看缓存自动释放，手动下载保留，正在供流的文件受保护。</p><div className="about-links"><button className="button" disabled={cache.busy || clearing} onClick={clearCache}>{clearing ? '清理中…' : '清理播放缓存'}</button><button className="button" disabled={clearing} onClick={refreshCache}><RefreshCw />刷新缓存状态</button></div>{cache.error && <p className="text-error" role="alert">{cache.error}</p>}</section>
     <section className="about-section"><h2>追剧缓存</h2><p className="cache-status" role="status">{follow.busy ? '正在读取追剧缓存…' : typeof follow.files === 'number' ? `${Object.keys(follow.series || {}).length} 部剧 · ${follow.files} 个文件 · ${byteText(follow.bytes)}${follow.budgetBytes ? ` / 预算 ${byteText(follow.budgetBytes)}` : ''}` : '追剧缓存状态暂未读取'}</p><p className="cache-note">「我的追剧」里的剧会在应用打开期间自动逐集缓存，固定优先最高清晰度（无 1080p 时自动退 720p/自动），不随播放清晰度设置变化；自动模式下播放直接使用缓存中的最高画质。分季剧各季一并缓存；超出预算后自动删除最久未看的缓存，手动下载不受影响。暂停后已缓存内容仍可播放。</p><div className="about-links"><button className="button" disabled={follow.busy || followToggling} onClick={toggleFollow}>{followToggling ? '切换中…' : follow.enabled === false ? '开启自动缓存' : '暂停自动缓存'}</button><button className="button" disabled={follow.busy || followClearing} onClick={clearFollow}>{followClearing ? '清理中…' : '清理追剧缓存'}</button><button className="button" disabled={followClearing} onClick={refreshFollow}><RefreshCw />刷新缓存状态</button></div>{follow.error && <p className="text-error" role="alert">{follow.error}</p>}</section>
     <section className="about-section"><h2>使用说明</h2><p>电视可用方向键移动焦点、确认键打开。返回键先关闭详情，再回到发现页；播放器左上角可直接返回选集。</p><p>完整分集都可选择；播放和下载依次尝试网页常规入口、网页备用入口与 App 片源。选集中的「自动取源」不是锁定标志，也不表示所有分集已经验证可播；失败会显示实际原因。</p><p>自动连播默认开启，当前集结束后继续为下一集自动取源；取源失败时保留重试和返回入口。下载完成后，可在「下载」页面离线播放。</p></section>
+    {info.isTv && <section className="about-section"><h2>竖屏投影</h2><div className="about-links"><span style={{ alignSelf: 'center' }}>画面旋转</span><select aria-label="竖屏投影画面旋转" value={rotation} disabled={rotationBusy} onChange={(event) => changeRotation(event.target.value)}><option value="0">关闭（横放观看）</option><option value="90">90°（投影仪侧放）</option><option value="270">270°（反向侧放）</option></select></div><p className="cache-note">看竖屏短剧时把投影仪侧放（转 90° 横躺），先在投影仪系统设置里关闭自动梯形校正，再选 90° 或 270°，画面和界面都会旋转铺满整面墙。遥控器方向键依然好用；播放器底部菜单的「旋转」也可随时切换。</p></section>}
     <section className="about-section"><h2>开源与许可</h2><p>本应用基于 jackotom/hongguo-drama，遵循 GPL-3.0 许可。安卓适配代码与构建说明随完整项目源码提供，分发修改版时需保留许可与源码。</p><div className="about-links"><button className="button" onClick={() => external('https://github.com/jackotom/hongguo-drama')}><ExternalLink />上游项目</button><button className="button" onClick={() => external('https://www.gnu.org/licenses/gpl-3.0.html')}><ExternalLink />GPL-3.0 许可网页</button></div><details className="license-details"><summary tabIndex={0}>GPL-3.0 许可全文（离线）</summary><pre className="license-text" tabIndex={0} aria-label="GPL-3.0 许可全文，可滚动阅读">{gplLicense}</pre></details></section>
   </>;
 }

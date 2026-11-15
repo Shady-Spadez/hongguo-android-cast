@@ -347,7 +347,12 @@ final class NativeBridge {
                 break;
             }
             case "getPlaybackOptions": respond(id, PlayerOptions.read(activity), null); break;
-            case "setPlaybackOptions": respond(id, PlayerOptions.update(activity, params), null); break;
+            case "setPlaybackOptions": {
+                JSONObject updated = PlayerOptions.update(activity, params);
+                // Portrait projection rotates the browsing UI the moment it is chosen.
+                if (params != null && params.has("screenRotation")) activity.applyScreenRotationOnUiThread();
+                respond(id, updated, null); break;
+            }
             case "getSearchHistory": respond(id, store.searchHistory(), null); break;
             case "addSearchHistory": respond(id, store.addSearchHistory(params), null); break;
             case "removeSearchHistory": respond(id, store.removeSearchHistory(params), null); break;

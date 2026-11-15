@@ -53,6 +53,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     private boolean prepared;
     private int seekOnPrepare;
     private int videoWidth, videoHeight;
+    private int screenRotation;
     private OnPreparedListener onPreparedListener;
     private OnCompletionListener onCompletionListener;
     private OnErrorListener onErrorListener;
@@ -66,6 +67,11 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
     }
 
     public void setVideoURI(Uri uri) { setVideoURI(uri, null, null); }
+
+    /** Portrait projection: 90/270 rewrites the container's tkhd display matrix before open so
+     *  Media3 passes rotationDegrees into MediaCodec KEY_ROTATION and the decoder-side native
+     *  window transform rotates the frames (verified on this hi3751). 0 restores identity. */
+    public void setScreenRotation(int degrees) { screenRotation = degrees == 90 || degrees == 270 ? degrees : 0; }
 
     public void setVideoURI(Uri uri, Map<String, String> requestHeaders) { setVideoURI(uri, requestHeaders, null); }
 
@@ -157,6 +163,7 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
         if ("file".equals(source.getScheme())) {
             if (staging != null) awaitStagedHead(source.getPath(), 768 * 1024);
             patchHevcLevelClaim(source.getPath());
+            patchDisplayMatrix(source.getPath(), screenRotation);
         }
         ExoPlayer fresh = new ExoPlayer.Builder(getContext()).build();
         fresh.setVideoSurface(surface);
@@ -339,6 +346,90 @@ final class MediaVideoView extends SurfaceView implements SurfaceHolder.Callback
                     file.seek(i + 10);
                     file.write(buffer[i + 10]);
                 }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (file != null) try { file.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    /**
+     * Portrait projection rotates the decoded frames via the standard container path: rewrite the
+     * tkhd display matrix (36 bytes, fixed offset — no box lengths change), Mp4Extractor surfaces
+     * it as Format.rotationDegrees, MediaCodecVideoRenderer forwards it as MediaFormat
+     * KEY_ROTATION, and the OMX native-window transform rotates every buffer at composition.
+     * Verified on this box: 90° fills the 1920x1080 surface with Media3 reporting the swapped
+     * 1282x720, so the existing aspect-fit onMeasure needs no changes. Writing identity back on
+     * rotation-off makes the patch self-healing for files cached while rotated. All tkhd boxes
+     * under every trak are rewritten (the audio track's matrix is inert); a moov beyond the head
+     * window or a malformed walk simply leaves the file untouched and playback unrotated.
+     */
+    private static void patchDisplayMatrix(String path, int degrees) {
+        if (path == null) return;
+        // Row-major (a, b, tx, c, d, ty, u, v, w) in 16.16 fixed point, per ISO 14496-12.
+        final int[] identity = { 0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000 };
+        final int[] clockwise90 = { 0, 0x00010000, 0, (int) 0xffff0000, 0, 0, 0, 0, 0x40000000 };
+        final int[] clockwise270 = { 0, (int) 0xffff0000, 0, 0x00010000, 0, 0, 0, 0, 0x40000000 };
+        final int[] target = degrees == 90 ? clockwise90 : degrees == 270 ? clockwise270 : identity;
+        java.io.RandomAccessFile file = null;
+        try {
+            file = new java.io.RandomAccessFile(path, "rw");
+            long length = file.length();
+            int window = (int) Math.min(512 * 1024L, length);
+            if (window < 8) return;
+            byte[] buffer = new byte[window];
+            file.readFully(buffer);
+            // Locate the moov box among the top-level boxes of the head window.
+            int moovStart = -1, moovEnd = -1;
+            int offset = 0;
+            while (offset + 8 <= window) {
+                long size = ((buffer[offset] & 0xffL) << 24) | ((buffer[offset + 1] & 0xffL) << 16) | ((buffer[offset + 2] & 0xffL) << 8) | (buffer[offset + 3] & 0xffL);
+                if (size < 8) break; // size 0 (to EOF) or 64-bit largesize: not expected at the head
+                String type = new String(buffer, offset + 4, 4, java.nio.charset.StandardCharsets.US_ASCII);
+                if ("moov".equals(type)) { moovStart = offset; moovEnd = (int) Math.min(offset + size, window); break; }
+                offset += (int) size;
+            }
+            if (moovStart < 0) return;
+            // moov -> trak -> tkhd, rewriting every tkhd whose matrix differs from the target.
+            int child = moovStart + 8;
+            while (child + 8 <= moovEnd) {
+                long trakSize = ((buffer[child] & 0xffL) << 24) | ((buffer[child + 1] & 0xffL) << 16) | ((buffer[child + 2] & 0xffL) << 8) | (buffer[child + 3] & 0xffL);
+                String trakType = new String(buffer, child + 4, 4, java.nio.charset.StandardCharsets.US_ASCII);
+                if (trakSize < 8 || child + trakSize > moovEnd) break;
+                if ("trak".equals(trakType)) {
+                    int inner = child + 8, innerEnd = (int) (child + trakSize);
+                    while (inner + 8 <= innerEnd) {
+                        long tkhdSize = ((buffer[inner] & 0xffL) << 24) | ((buffer[inner + 1] & 0xffL) << 16) | ((buffer[inner + 2] & 0xffL) << 8) | (buffer[inner + 3] & 0xffL);
+                        String tkhdType = new String(buffer, inner + 4, 4, java.nio.charset.StandardCharsets.US_ASCII);
+                        if (tkhdSize < 8 || inner + tkhdSize > innerEnd) break;
+                        if ("tkhd".equals(tkhdType) && tkhdSize >= 8 + 4 + 20 + 16 + 36) {
+                            int payload = inner + 8;
+                            int version = buffer[payload] & 0xff;
+                            int matrixOffset = payload + 4 + (version == 1 ? 32 : 20) + 16;
+                            if (matrixOffset + 36 <= inner + tkhdSize) {
+                                boolean differs = false;
+                                for (int i = 0; i < 9; i++) {
+                                    int current = ((buffer[matrixOffset + i * 4] & 0xff) << 24) | ((buffer[matrixOffset + i * 4 + 1] & 0xff) << 16) | ((buffer[matrixOffset + i * 4 + 2] & 0xff) << 8) | (buffer[matrixOffset + i * 4 + 3] & 0xff);
+                                    if (current != target[i]) { differs = true; break; }
+                                }
+                                if (differs) {
+                                    byte[] matrix = new byte[36];
+                                    for (int i = 0; i < 9; i++) {
+                                        matrix[i * 4] = (byte) (target[i] >>> 24);
+                                        matrix[i * 4 + 1] = (byte) (target[i] >>> 16);
+                                        matrix[i * 4 + 2] = (byte) (target[i] >>> 8);
+                                        matrix[i * 4 + 3] = (byte) target[i];
+                                    }
+                                    file.seek(matrixOffset);
+                                    file.write(matrix);
+                                    System.arraycopy(matrix, 0, buffer, matrixOffset, 36);
+                                }
+                            }
+                        }
+                        inner += (int) tkhdSize;
+                    }
+                }
+                child += (int) trakSize;
             }
         } catch (Exception ignored) {
         } finally {
